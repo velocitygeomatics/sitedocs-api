@@ -1,0 +1,6 @@
+azure-functions
+azure-keyvault-secrets
+azure-identity
+psycopg2-binary
+python-dotenv
+requests
