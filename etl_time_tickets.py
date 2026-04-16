@@ -19,10 +19,11 @@ import requests
 import psycopg2
 import psycopg2.extras
 
-# Load .env for local dev (no-op in Azure)
+# Load .env for local dev (no-op in Azure). override=True so .env wins
+# over any stale shell env vars.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass
 
