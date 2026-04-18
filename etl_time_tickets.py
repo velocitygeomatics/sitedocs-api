@@ -218,11 +218,8 @@ def _num(val: Optional[str]) -> Optional[float]:
 
 def _date(val: Optional[str]) -> Optional[str]:
     """Parse a date string into YYYY-MM-DD for Postgres.
-    Handles ISO dates, natural language dates ('March 3', 'Jan 22, 2026.',
-    'February 3rd, 2026'), and returns None if unparseable.
-
-    Known unhandled edge case: missing space after comma ('Feb 21,2026').
-    Left as NULL by design — low occurrence, safe fallback.
+    Handles ISO, natural language ('March 3', 'Jan 22, 2026.', 'Feb 3rd, 2026',
+    'Feb 21,2026', 'Feb 4/26', '2026 01 25'). Returns None if unparseable.
     """
     if not val:
         return None
