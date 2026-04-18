@@ -20,7 +20,9 @@ CREATE TABLE time_tickets (
     -- -------------------------------------------------------
     -- General Information
     -- -------------------------------------------------------
-    ticket_date             DATE,               -- "Date" field
+    ticket_date             DATE,               -- "Date" field, ISO-normalized
+    date_source             TEXT,               -- 'exact' | 'label' | 'inferred' | 'unknown'
+                                                -- where ticket_date came from (see etl/utils.resolve_ticket_date)
     client                  TEXT,               -- "Client"
     client_field_rep        TEXT,               -- "Client Field Representative"
     job_no                  TEXT,               -- "Job No"
@@ -87,3 +89,12 @@ CREATE INDEX idx_tt_client         ON time_tickets (client);
 CREATE INDEX idx_tt_crew_chief     ON time_tickets (crew_chief);
 CREATE INDEX idx_tt_location_id    ON time_tickets (location_id);
 CREATE INDEX idx_tt_submitted_on   ON time_tickets (submitted_on);
+
+-- =============================================================
+-- Idempotent migrations (safe to run against an existing table)
+-- =============================================================
+
+-- Added 2026-04-18: track where ticket_date came from so the UI can flag
+-- inferred (not exact) dates for human verification.
+ALTER TABLE time_tickets
+    ADD COLUMN IF NOT EXISTS date_source TEXT;
