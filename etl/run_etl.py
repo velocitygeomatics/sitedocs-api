@@ -155,7 +155,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--only",
         help="Run a single stage only (e.g. --only workers)",
-        choices=[s[0] for s in STAGES],
+        choices=["lookups","companies","workers","equipment","certifications",
+                 "forms","incidents","attachments","time_tickets"],
         default=None,
     )
     parser.add_argument(
