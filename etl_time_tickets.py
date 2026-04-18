@@ -229,8 +229,9 @@ def _num(val: Optional[str]) -> Optional[float]:
 
 def _date(val: Optional[str]) -> Optional[str]:
     """Parse a date string into YYYY-MM-DD for Postgres.
-    Handles ISO dates, natural language dates ('March 3', 'Jan 22, 2026.',
-    'February 3rd, 2026'), and returns None if unparseable."""
+    Handles ISO, natural language ('March 3', 'Jan 22, 2026.', 'Feb 3rd, 2026',
+    'Feb 21,2026', 'Feb 4/26', '2026 01 25'). Returns None if unparseable.
+    """
     if not val:
         return None
     val = val.strip().rstrip(".")
@@ -239,13 +240,17 @@ def _date(val: Optional[str]) -> Optional[str]:
     if re.match(r'^\d{4}-\d{2}-\d{2}$', val):
         return val
 
+    # Insert missing space after comma: 'Feb 21,2026' → 'Feb 21, 2026'
+    val = re.sub(r'([a-zA-Z]),(\d)', r'\1, \2', val)
+
     # Strip ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
     cleaned = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', val)
 
     # Try common formats
     for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y",
                 "%B %d", "%b %d", "%m/%d/%Y", "%m-%d-%Y",
-                "%d %B %Y", "%d %b %Y", "%Y/%m/%d"):
+                "%d %B %Y", "%d %b %Y", "%Y/%m/%d",
+                "%b %d/%y", "%Y %m %d"):
         try:
             parsed = datetime.strptime(cleaned, fmt)
             # If no year was in the format, infer from current year

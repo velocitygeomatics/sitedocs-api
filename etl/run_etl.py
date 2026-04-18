@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("etl.orchestrator")
 
-from .utils import get_db_conn, ensure_state_table, log_etl_error
+from .utils import get_db_conn, ensure_state_table, log_etl_error, get_last_sync
 from . import (
     sync_lookups,
     sync_companies,
@@ -69,24 +69,26 @@ from etl_time_tickets import sync_time_tickets
 # Run order definition
 # ---------------------------------------------------------------------------
 
-STAGES = [
-    ("lookups",       sync_lookups.run),
-    ("companies",     sync_companies.run),
-    ("workers",       sync_workers.run),
-    ("equipment",     sync_equipment.run),
-    ("certifications",sync_certifications.run),
-    ("forms",         sync_forms.run),
-    ("incidents",     sync_incidents.run),
-    ("attachments",   sync_attachments.run),
-    ("time_tickets",  lambda conn: sync_time_tickets()),  # uses its own conn
-]
+def _build_stages(mode: str, conn):
+    since = get_last_sync(conn, "time_tickets") if mode == "new" else None
+    return [
+        ("lookups",        sync_lookups.run),
+        ("companies",      sync_companies.run),
+        ("workers",        sync_workers.run),
+        ("equipment",      sync_equipment.run),
+        ("certifications", sync_certifications.run),
+        ("forms",          sync_forms.run),
+        ("incidents",      sync_incidents.run),
+        ("attachments",    sync_attachments.run),
+        ("time_tickets",   lambda conn: sync_time_tickets(since=since)),
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def run_etl(only: str = None, dry_run: bool = False):
+def run_etl(only: str = None, dry_run: bool = False, mode: str = "all"):
     start = datetime.now(timezone.utc)
     log.info(f"ETL started at {start.isoformat()}")
 
@@ -98,9 +100,11 @@ def run_etl(only: str = None, dry_run: bool = False):
         conn.close()
         return
 
+    stages = _build_stages(mode, conn)
+    log.info(f"ETL mode: {mode}")
     results = {}
 
-    for stage_name, stage_fn in STAGES:
+    for stage_name, stage_fn in stages:
         if only and stage_name != only:
             continue
 
@@ -159,5 +163,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Test DB connection only, no API calls",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["new", "all"],
+        default="all",
+        help="new = only time tickets modified since last sync; all = full sync (default)",
+    )
     args = parser.parse_args()
-    run_etl(only=args.only, dry_run=args.dry_run)
+    run_etl(only=args.only, dry_run=args.dry_run, mode=args.mode)
