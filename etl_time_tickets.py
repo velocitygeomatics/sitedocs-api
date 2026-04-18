@@ -27,6 +27,9 @@ try:
 except ImportError:
     pass
 
+# Shared date helpers — see etl/utils.py for implementation details.
+from etl.utils import resolve_ticket_date, parse_date
+
 logging.basicConfig(
     level=logging.INFO,
     format='{"time":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
@@ -207,33 +210,8 @@ def _num(val: Optional[str]) -> Optional[float]:
         return None
 
 
-def _date(val: Optional[str]) -> Optional[str]:
-    """Return date string as-is for psycopg2 to handle, or None."""
-    return val if val else None
-
-
-def _date_from_label(label: Optional[str]) -> Optional[str]:
-    """
-    Parse a date from a form label as fallback.
-    Handles patterns like: 2026-04-07-JSL-DFT, 260095-JS-04072026-FT
-    Returns YYYY-MM-DD string or None.
-    """
-    if not label:
-        return None
-    # Pattern 1: YYYY-MM-DD at start of label
-    m = re.search(r'\b(20\d{2}-\d{2}-\d{2})\b', label)
-    if m:
-        return m.group(1)
-    # Pattern 2: MMDDYYYY embedded e.g. 04072026
-    m = re.search(r'\b(\d{2})(\d{2})(20\d{2})\b', label)
-    if m:
-        mm, dd, yyyy = m.group(1), m.group(2), m.group(3)
-        try:
-            datetime(int(yyyy), int(mm), int(dd))
-            return f"{yyyy}-{mm}-{dd}"
-        except ValueError:
-            pass
-    return None
+# Date parsing lives in etl/utils.py — parse_date(), date_from_label(),
+# date_from_submitted_on(), and the all-in-one resolve_ticket_date().
 
 
 def _extract_signature(content: dict) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
@@ -266,8 +244,14 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
     f = _extract_field
     label = form.get("Label") or ""
 
-    # Date: try form field first, fall back to parsing the label
-    ticket_date = _date(f(content, "Date")) or _date_from_label(label)
+    # Date resolution chain (all in etl/utils.resolve_ticket_date):
+    #   1. parse_date(raw_field)                     -> 'exact'
+    #   2. parse_date(raw_field, fallback_year=yr)   -> 'label' (no-year cases)
+    #   3. date_from_label(label)                    -> 'label'
+    #   4. date_from_submitted_on(form) minus 1 day  -> 'inferred'
+    #   5. None                                       -> 'unknown'
+    # date_source is recorded on the row so the UI can warn on inferred values.
+    ticket_date, date_source = resolve_ticket_date(form, f(content, "Date"))
 
     # Worker fields are JSON arrays — extract name
     crew_chief = _extract_worker_name(f(content, "Crew Chief"))
@@ -290,6 +274,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
 
         # General Information
         "ticket_date":          ticket_date,
+        "date_source":          date_source,        # 'exact' | 'label' | 'inferred' | 'unknown'
         "client":               f(content, "Client"),
         "client_field_rep":     f(content, "Client Field Representative"),
         "job_no":               f(content, "Job No"),
@@ -325,7 +310,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
         # Notes / Approval
         "details":              f(content, "Details"),
         "approval":             f(content, "Approval"),
-        "approval_date":        _date(f(content, "Approval Date")),
+        "approval_date":        parse_date(f(content, "Approval Date")),
 
         # Signature
         "signed_by":            signed_by,
@@ -344,7 +329,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
 UPSERT_SQL = """
 INSERT INTO time_tickets (
     form_id, form_label, location_id, location_name, submitted_on, is_deleted,
-    ticket_date, client, client_field_rep, job_no, wellsite_location,
+    ticket_date, date_source, client, client_field_rep, job_no, wellsite_location,
     project_manager, crew_chief, assistant,
     survey_equipment_day, pipe_locator_hrs, chainsaw_hrs, jackhammer_hrs,
     truck_km, truck_hours, atv_utv_snowmobile, marker_posts, iron_posts,
@@ -357,7 +342,7 @@ INSERT INTO time_tickets (
 VALUES (
     %(form_id)s, %(form_label)s, %(location_id)s, %(location_name)s,
     %(submitted_on)s, %(is_deleted)s,
-    %(ticket_date)s, %(client)s, %(client_field_rep)s, %(job_no)s,
+    %(ticket_date)s, %(date_source)s, %(client)s, %(client_field_rep)s, %(job_no)s,
     %(wellsite_location)s, %(project_manager)s, %(crew_chief)s, %(assistant)s,
     %(survey_equipment_day)s, %(pipe_locator_hrs)s, %(chainsaw_hrs)s,
     %(jackhammer_hrs)s, %(truck_km)s, %(truck_hours)s, %(atv_utv_snowmobile)s,
@@ -375,6 +360,7 @@ ON CONFLICT (form_id) DO UPDATE SET
     submitted_on         = EXCLUDED.submitted_on,
     is_deleted           = EXCLUDED.is_deleted,
     ticket_date          = EXCLUDED.ticket_date,
+    date_source          = EXCLUDED.date_source,
     client               = EXCLUDED.client,
     client_field_rep     = EXCLUDED.client_field_rep,
     job_no               = EXCLUDED.job_no,
@@ -411,10 +397,31 @@ ON CONFLICT (form_id) DO UPDATE SET
 """
 
 
-def upsert_batch(conn, rows: list[dict]):
+def upsert_batch(conn, rows: list[dict]) -> tuple[int, int]:
+    """
+    Upsert rows one-at-a-time with per-row savepoints so a bad row (e.g. an
+    un-parseable date value) doesn't poison the whole batch. Previously the
+    batch used execute_batch inside a single transaction — the first row
+    that tripped a type constraint would abort the transaction and every
+    subsequent row would fail with "current transaction is aborted."
+
+    Returns (succeeded, failed).
+    """
+    succeeded = 0
+    failed    = 0
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, UPSERT_SQL, rows, page_size=50)
+        for row in rows:
+            try:
+                cur.execute("SAVEPOINT row_sp")
+                cur.execute(UPSERT_SQL, row)
+                cur.execute("RELEASE SAVEPOINT row_sp")
+                succeeded += 1
+            except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT row_sp")
+                log.error(f"Upsert failed for form {row.get('form_id')}: {e}")
+                failed += 1
     conn.commit()
+    return succeeded, failed
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +440,13 @@ def sync_time_tickets(since: Optional[str] = None):
 
     conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
-    errors = 0
+    parse_errors  = 0
+    upsert_failed = 0
+    upsert_ok     = 0
+
+    def _flush(batch):
+        ok, fail = upsert_batch(conn, batch)
+        return ok, fail
 
     for i, form in enumerate(forms):
         form_id = form["Id"]
@@ -446,20 +459,27 @@ def sync_time_tickets(since: Optional[str] = None):
             batch.append(row)
 
             if len(batch) >= 50:
-                upsert_batch(conn, batch)
-                log.info(f"Upserted {i+1}/{len(forms)} forms")
+                ok, fail = _flush(batch)
+                upsert_ok     += ok
+                upsert_failed += fail
+                log.info(f"Upserted {i+1}/{len(forms)} forms (ok={upsert_ok} fail={upsert_failed})")
                 batch = []
 
         except Exception as e:
-            log.error(f"Failed form {form_id}: {e}")
-            errors += 1
+            log.error(f"Failed to fetch/parse form {form_id}: {e}")
+            parse_errors += 1
             continue
 
     if batch:
-        upsert_batch(conn, batch)
+        ok, fail = _flush(batch)
+        upsert_ok     += ok
+        upsert_failed += fail
 
     conn.close()
-    log.info(f"Sync complete. {len(forms) - errors} succeeded, {errors} errors.")
+    log.info(
+        f"Sync complete. fetched={len(forms)} "
+        f"upserted={upsert_ok} upsert_failed={upsert_failed} parse_errors={parse_errors}"
+    )
 
 
 if __name__ == "__main__":
