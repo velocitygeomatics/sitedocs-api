@@ -147,9 +147,15 @@ def sync_company_locations(conn, locations: list):
     """
     if mapped:
         import psycopg2.extras
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log.error(f"company_locations batch insert failed: {e}")
+            from .utils import log_etl_error
+            log_etl_error(conn, "company_locations", None, e)
 
     set_last_sync(conn, "company_locations", len(mapped))
     log.info(f"  company_locations: {len(mapped)} rows ({skipped} skipped — owner company not in contractors list)")

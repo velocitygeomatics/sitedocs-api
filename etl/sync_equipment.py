@@ -115,9 +115,15 @@ def sync_equipment_locations(conn, equipments: list):
             VALUES (%(equipment_id)s, %(location_id)s)
             ON CONFLICT (equipment_id, location_id) DO NOTHING
         """
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log.error(f"equipment_locations batch insert failed: {e}")
+            from .utils import log_etl_error
+            log_etl_error(conn, "equipment_locations", None, e)
 
     set_last_sync(conn, "equipment_locations", len(mapped))
     log.info(f"  equipment_locations: {len(mapped)} rows")
@@ -153,9 +159,15 @@ def sync_equipment_workers(conn, equipments: list):
             VALUES (%(equipment_id)s, %(worker_id)s)
             ON CONFLICT (equipment_id, worker_id) DO NOTHING
         """
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log.error(f"equipment_workers batch insert failed: {e}")
+            from .utils import log_etl_error
+            log_etl_error(conn, "equipment_workers", None, e)
 
     set_last_sync(conn, "equipment_workers", len(mapped))
     log.info(f"  equipment_workers: {len(mapped)} rows")

@@ -210,8 +210,11 @@ def log_etl_error(conn, stage: str, entity_id: str, error: Exception,
 # ---------------------------------------------------------------------------
 
 def upsert(conn, table: str, rows: list[dict], conflict_col: str = "id"):
+    """Resilient batch upsert. On batch failure: rolls back, retries
+    row-by-row, and writes each failed row to etl_errors. Returns the
+    count of successfully upserted rows."""
     if not rows:
-        return
+        return 0
 
     cols = list(rows[0].keys())
     col_str  = ", ".join(cols)
@@ -226,9 +229,31 @@ def upsert(conn, table: str, rows: list[dict], conflict_col: str = "id"):
         ON CONFLICT ({conflict_col}) DO UPDATE SET {update_str}
     """
 
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, sql, rows, page_size=100)
-    conn.commit()
+    # Fast path: batch upsert
+    try:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(cur, sql, rows, page_size=100)
+        conn.commit()
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        log.warning(f"upsert({table}): batch of {len(rows)} failed ({e}); "
+                    f"retrying row-by-row")
+
+    # Slow path: one at a time so a single bad row doesn't lose the batch
+    ok = 0
+    for row in rows:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, row)
+            conn.commit()
+            ok += 1
+        except Exception as e:
+            conn.rollback()
+            entity_id = row.get(conflict_col) or row.get("id")
+            log.error(f"upsert({table}) failed for {conflict_col}={entity_id}: {e}")
+            log_etl_error(conn, table, entity_id, e, row)
+    return ok
 
 
 def now_iso() -> str:

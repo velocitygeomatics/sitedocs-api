@@ -88,9 +88,15 @@ def sync_worker_locations(conn):
             VALUES (%(worker_id)s, %(location_id)s)
             ON CONFLICT (worker_id, location_id) DO NOTHING
         """
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log.error(f"worker_locations batch insert failed: {e}")
+            from .utils import log_etl_error
+            log_etl_error(conn, "worker_locations", None, e)
 
     set_last_sync(conn, "worker_locations", len(mapped))
     log.info(f"  worker_locations: {len(mapped)} rows ({skipped} locations skipped)")
