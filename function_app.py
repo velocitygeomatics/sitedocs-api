@@ -687,6 +687,70 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
     })
 
 
+@app.route(route="etl/summary", methods=["GET"])
+def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/etl/summary
+    One-shot digest for Power Automate / email reports: sync state,
+    record counts, 24h delta, unresolved error counts per stage, and
+    the most recent 20 errors. Does not save a snapshot (use /status).
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    from datetime import datetime, timezone, timedelta
+
+    tables = ["locations","companies","workers","worker_locations",
+              "certification_types","certifications",
+              "form_types","forms","time_tickets"]
+
+    sync_state = query("""
+        SELECT entity, last_sync, last_count
+        FROM etl_sync_state ORDER BY entity
+    """)
+
+    counts = {}
+    for tbl in tables:
+        try:
+            result = query(f"SELECT COUNT(*) AS n FROM {tbl}")
+            counts[tbl] = result[0]["n"] if result else 0
+        except Exception:
+            counts[tbl] = None
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    prev = query(
+        "SELECT entity, record_count FROM etl_daily_snapshot WHERE snapshot_date = %s",
+        (yesterday,))
+    prev_counts = {r["entity"]: r["record_count"] for r in prev}
+    deltas = {tbl: (counts.get(tbl) - prev_counts.get(tbl))
+              if counts.get(tbl) is not None and prev_counts.get(tbl) is not None
+              else None for tbl in tables}
+
+    error_counts = query("""
+        SELECT stage, COUNT(*) AS n
+        FROM etl_errors WHERE resolved = false
+        GROUP BY stage ORDER BY n DESC
+    """)
+    recent_errors = query("""
+        SELECT id, occurred_at, stage, entity_id, error_type, error_message
+        FROM etl_errors WHERE resolved = false
+        ORDER BY occurred_at DESC LIMIT 20
+    """)
+    total_unresolved = sum(r["n"] for r in error_counts)
+
+    return ok({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sync_state": sync_state,
+        "record_counts": counts,
+        "new_since_yesterday": deltas,
+        "errors": {
+            "unresolved_total": total_unresolved,
+            "by_stage": error_counts,
+            "recent": recent_errors,
+        },
+    })
+
+
 # ===========================================================================
 # ETL ERRORS
 # ===========================================================================
