@@ -29,13 +29,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Create and start virtual environment
+      - name: Install dependencies into .python_packages
+        # Azure Functions Python expects deps in .python_packages/lib/site-packages/
+        # so they're available at runtime. Installing into the runner's system
+        # Python doesn't reach Azure — they must be bundled into the zip.
         run: |
-          python -m venv venv
-          source venv/bin/activate
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
 
       # Optional: Add step to run tests here
 
