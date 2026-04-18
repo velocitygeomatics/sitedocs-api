@@ -478,3 +478,22 @@ CREATE TABLE IF NOT EXISTS etl_sync_state (
     last_count  INT,
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ============================================================
+-- 15. ETL ERROR LOG (dead-letter table for failed rows)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS etl_errors (
+    id              BIGSERIAL PRIMARY KEY,
+    occurred_at     TIMESTAMPTZ DEFAULT NOW(),
+    stage           TEXT NOT NULL,
+    entity_id       TEXT,
+    error_type      TEXT,
+    error_message   TEXT,
+    payload         JSONB,
+    resolved        BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_etl_errors_stage      ON etl_errors (stage);
+CREATE INDEX IF NOT EXISTS idx_etl_errors_occurred    ON etl_errors (occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_etl_errors_unresolved  ON etl_errors (resolved) WHERE resolved = FALSE;
