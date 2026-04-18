@@ -9,11 +9,22 @@ Run standalone or import sync_time_tickets() into your main ETL.
 
 import os
 import re
+import sys
 import logging
 import time
 import json
 from datetime import datetime, timezone
 from typing import Optional
+
+# Ensure Azure's bundled .python_packages/ is on sys.path. When this module
+# is run as a subprocess (e.g. `python -m etl_time_tickets`), the child
+# doesn't inherit sys.path mutations from the parent process.
+_pkg = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    ".python_packages", "lib", "site-packages",
+)
+if os.path.isdir(_pkg) and _pkg not in sys.path:
+    sys.path.insert(0, _pkg)
 
 import requests
 import psycopg2
