@@ -428,6 +428,35 @@ def upsert_batch(conn, rows: list[dict]):
     conn.commit()
 
 
+def upsert_one(conn, row: dict) -> bool:
+    """Upsert a single row. Returns True on success, False on failure
+    (and rolls back so the connection stays usable)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(UPSERT_SQL, row)
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log.error(f"Row upsert failed for form {row.get('form_id')}: {e}")
+        return False
+
+
+def flush_batch(conn, batch: list[dict]) -> int:
+    """Flush a batch; fall back to row-by-row on failure so one bad row
+    doesn't poison the whole batch or leave the connection aborted.
+    Returns the number of rows successfully upserted."""
+    if not batch:
+        return 0
+    try:
+        upsert_batch(conn, batch)
+        return len(batch)
+    except Exception as e:
+        conn.rollback()
+        log.warning(f"Batch of {len(batch)} failed ({e}); retrying row-by-row")
+        return sum(1 for row in batch if upsert_one(conn, row))
+
+
 # ---------------------------------------------------------------------------
 # Main sync
 # ---------------------------------------------------------------------------
@@ -445,6 +474,7 @@ def sync_time_tickets(since: Optional[str] = None):
     conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
     errors = 0
+    upserted = 0
 
     for i, form in enumerate(forms):
         form_id = form["Id"]
@@ -457,20 +487,25 @@ def sync_time_tickets(since: Optional[str] = None):
             batch.append(row)
 
             if len(batch) >= 50:
-                upsert_batch(conn, batch)
-                log.info(f"Upserted {i+1}/{len(forms)} forms")
+                upserted += flush_batch(conn, batch)
+                log.info(f"Processed {i+1}/{len(forms)} forms (upserted={upserted})")
                 batch = []
 
         except Exception as e:
             log.error(f"Failed form {form_id}: {e}")
             errors += 1
+            # Guard against a poisoned transaction from an earlier failed flush
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             continue
 
     if batch:
-        upsert_batch(conn, batch)
+        upserted += flush_batch(conn, batch)
 
     conn.close()
-    log.info(f"Sync complete. {len(forms) - errors} succeeded, {errors} errors.")
+    log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(forms)}")
 
 
 if __name__ == "__main__":

@@ -972,15 +972,29 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
 
     logging.info("Hourly PDF sync starting...")
 
-    # Credentials
-    tenant_id     = os.environ.get("SP_TENANT_ID",     "9d71e5ea-6164-445b-99c7-cc5b6b1f9e3a")
-    client_id     = os.environ.get("SP_CLIENT_ID",     "76d8a182-c87a-4df5-a888-a7f48ae9ff3e")
-    client_secret = _get_secret("SP_CLIENT_SECRET")
-    company_id    = os.environ.get("SITEDOCS_COMPANY_ID", "48651caf-50e4-45ab-875a-dfe02fa14441")
-    sd_token      = _get_secret("SITEDOCS_API_TOKEN")
+    # Credentials — fetch each one with explicit error context so a KV/config
+    # problem is obvious in App Insights instead of an opaque "Failed" status.
+    tenant_id    = os.environ.get("SP_TENANT_ID",     "9d71e5ea-6164-445b-99c7-cc5b6b1f9e3a")
+    client_id    = os.environ.get("SP_CLIENT_ID",     "76d8a182-c87a-4df5-a888-a7f48ae9ff3e")
+    company_id   = os.environ.get("SITEDOCS_COMPANY_ID", "48651caf-50e4-45ab-875a-dfe02fa14441")
+
+    try:
+        client_secret = _get_secret("SP_CLIENT_SECRET")
+    except Exception as e:
+        logging.error(f"PDF sync aborting: _get_secret('SP_CLIENT_SECRET') threw: {type(e).__name__}: {e}")
+        return
+
+    try:
+        sd_token = _get_secret("SITEDOCS_API_TOKEN")
+    except Exception as e:
+        logging.error(f"PDF sync aborting: _get_secret('SITEDOCS_API_TOKEN') threw: {type(e).__name__}: {e}")
+        return
 
     if not client_secret:
-        logging.error("SP_CLIENT_SECRET not set — skipping PDF sync")
+        logging.error("PDF sync aborting: SP_CLIENT_SECRET is empty (check Key Vault / App Settings)")
+        return
+    if not sd_token:
+        logging.error("PDF sync aborting: SITEDOCS_API_TOKEN is empty (check Key Vault / App Settings)")
         return
 
     GRAPH_BASE  = "https://graph.microsoft.com/v1.0"
