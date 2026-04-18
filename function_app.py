@@ -1040,7 +1040,7 @@ def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
     try:
         for stage in ["forms", "time_tickets"]:
             result = subprocess.run(
-                [sys.executable, "-m", "etl.run_etl", "--only", stage],
+                [sys.executable, "-m", "etl.run_etl", "--only", stage, "--mode", "new"],
                 capture_output=True, text=True, timeout=600
             )
             logging.info(f"  {stage}: exit={result.returncode}")
@@ -1068,9 +1068,12 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
         body = {}
 
     only = body.get("only")
+    mode = body.get("mode", "all")  # "new" or "all"
     cmd = [sys.executable, "-m", "etl.run_etl"]
     if only:
         cmd += ["--only", only]
+    if mode in ("new", "all"):
+        cmd += ["--mode", mode]
 
     # Run async so the HTTP response returns immediately
     def run():
