@@ -70,6 +70,15 @@ def _get_headers() -> dict:
         "Accept": "application/json",
     }
 
+def _log_error(conn, entity_id, error, payload=None):
+    """Persist failed row to etl_errors table."""
+    try:
+        from etl.utils import log_etl_error
+        log_etl_error(conn, "time_tickets", entity_id, error, payload)
+    except Exception as e:
+        log.warning(f"Could not persist ETL error: {e}")
+
+
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
@@ -428,6 +437,7 @@ def upsert_one(conn, row: dict) -> bool:
     except Exception as e:
         conn.rollback()
         log.error(f"Row upsert failed for form {row.get('form_id')}: {e}")
+        _log_error(conn, row.get("form_id"), e, row)
         return False
 
 
@@ -483,7 +493,7 @@ def sync_time_tickets(since: Optional[str] = None):
         except Exception as e:
             log.error(f"Failed form {form_id}: {e}")
             errors += 1
-            # Guard against a poisoned transaction from an earlier failed flush
+            _log_error(conn, form_id, e)
             try:
                 conn.rollback()
             except Exception:

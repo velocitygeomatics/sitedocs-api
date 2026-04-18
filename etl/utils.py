@@ -160,10 +160,49 @@ def set_last_sync(conn, entity: str, count: int):
     conn.commit()
 
 
+ENSURE_ERRORS_TABLE = """
+CREATE TABLE IF NOT EXISTS etl_errors (
+    id              BIGSERIAL PRIMARY KEY,
+    occurred_at     TIMESTAMPTZ DEFAULT NOW(),
+    stage           TEXT NOT NULL,
+    entity_id       TEXT,
+    error_type      TEXT,
+    error_message   TEXT,
+    payload         JSONB,
+    resolved        BOOLEAN DEFAULT FALSE
+);
+"""
+
+
 def ensure_state_table(conn):
     with conn.cursor() as cur:
         cur.execute(ENSURE_STATE_TABLE)
+        cur.execute(ENSURE_ERRORS_TABLE)
     conn.commit()
+
+
+def log_etl_error(conn, stage: str, entity_id: str, error: Exception,
+                  payload: dict = None):
+    """Persist a failed row to etl_errors for later troubleshooting."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO etl_errors (stage, entity_id, error_type, error_message, payload)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                stage,
+                str(entity_id) if entity_id else None,
+                type(error).__name__,
+                str(error)[:2000],
+                json.dumps(payload, default=str) if payload else None,
+            ))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"Failed to log ETL error to DB: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

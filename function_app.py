@@ -688,6 +688,75 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ===========================================================================
+# ETL ERRORS
+# ===========================================================================
+
+@app.route(route="etl/errors", methods=["GET"])
+def get_etl_errors(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/etl/errors
+    Query params:
+      stage      — filter by ETL stage (e.g. time_tickets, forms)
+      resolved   — true/false (default: false — show unresolved only)
+      limit      — max rows (default 50, max 500)
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    conditions = []
+    params = []
+
+    stage = req.params.get("stage")
+    if stage:
+        conditions.append("stage = %s")
+        params.append(stage)
+
+    resolved = req.params.get("resolved", "false")
+    conditions.append("resolved = %s")
+    params.append(resolved.lower() == "true")
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    try:
+        limit = min(int(req.params.get("limit", 50)), 500)
+    except ValueError:
+        limit = 50
+
+    rows = query(f"""
+        SELECT id, occurred_at, stage, entity_id, error_type,
+               error_message, payload, resolved
+        FROM etl_errors
+        {where}
+        ORDER BY occurred_at DESC
+        LIMIT %s
+    """, tuple(params + [limit]))
+
+    return ok(rows)
+
+
+@app.route(route="etl/errors/{id}/resolve", methods=["POST"])
+def resolve_etl_error(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /api/etl/errors/{id}/resolve — mark an error as resolved."""
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    error_id = req.route_params.get("id")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE etl_errors SET resolved = true WHERE id = %s RETURNING id",
+                (error_id,))
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return not_found("ETL error")
+        return ok({"id": int(error_id), "resolved": True})
+    finally:
+        conn.close()
+
+
+# ===========================================================================
 # FORM PDF PROXY
 # ===========================================================================
 

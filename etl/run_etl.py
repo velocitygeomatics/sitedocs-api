@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("etl.orchestrator")
 
-from .utils import get_db_conn, ensure_state_table
+from .utils import get_db_conn, ensure_state_table, log_etl_error
 from . import (
     sync_lookups,
     sync_companies,
@@ -118,12 +118,11 @@ def run_etl(only: str = None, dry_run: bool = False):
             elapsed = (datetime.now(timezone.utc) - stage_start).total_seconds()
             results[stage_name] = {"status": "error", "error": str(e), "elapsed_s": round(elapsed, 1)}
             log.error(f"STAGE {stage_name} FAILED: {e}", exc_info=True)
-            # Roll back broken transaction so next stage gets a clean connection
             try:
                 conn.rollback()
             except Exception:
                 pass
-            # Continue to next stage — don't abort the whole run
+            log_etl_error(conn, stage_name, None, e)
 
     conn.close()
 
