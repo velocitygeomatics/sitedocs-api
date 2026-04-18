@@ -238,7 +238,8 @@ def _date(val: Optional[str]) -> Optional[str]:
     # Try common formats
     for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y",
                 "%B %d", "%b %d", "%m/%d/%Y", "%m-%d-%Y",
-                "%d %B %Y", "%d %b %Y", "%Y/%m/%d"):
+                "%d %B %Y", "%d %b %Y", "%Y/%m/%d",
+                "%b %d/%y", "%Y %m %d"):
         try:
             parsed = datetime.strptime(cleaned, fmt)
             # If no year was in the format, infer from current year
