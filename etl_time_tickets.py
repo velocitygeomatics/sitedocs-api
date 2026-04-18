@@ -217,8 +217,35 @@ def _num(val: Optional[str]) -> Optional[float]:
 
 
 def _date(val: Optional[str]) -> Optional[str]:
-    """Return date string as-is for psycopg2 to handle, or None."""
-    return val if val else None
+    """Parse a date string into YYYY-MM-DD for Postgres.
+    Handles ISO dates, natural language dates ('March 3', 'Jan 22, 2026.',
+    'February 3rd, 2026'), and returns None if unparseable."""
+    if not val:
+        return None
+    val = val.strip().rstrip(".")
+
+    # Already ISO — pass through
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', val):
+        return val
+
+    # Strip ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+    cleaned = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', val)
+
+    # Try common formats
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y",
+                "%B %d", "%b %d", "%m/%d/%Y", "%m-%d-%Y",
+                "%d %B %Y", "%d %b %Y", "%Y/%m/%d"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+            # If no year was in the format, infer from current year
+            if "%Y" not in fmt and "%y" not in fmt:
+                parsed = parsed.replace(year=datetime.now().year)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    log.warning(f"Unparseable date value, setting to NULL: '{val}'")
+    return None
 
 
 def _date_from_label(label: Optional[str]) -> Optional[str]:
