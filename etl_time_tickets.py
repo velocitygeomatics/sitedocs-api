@@ -19,6 +19,14 @@ import requests
 import psycopg2
 import psycopg2.extras
 
+# Load .env for local dev (no-op in Azure). override=True so .env wins
+# over any stale shell env vars.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='{"time":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
@@ -28,25 +36,39 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SITEDOCS_TOKEN  = os.environ["SITEDOCS_API_TOKEN"]
 FORM_TYPE_ID    = "6c3f93b6-1326-478b-a6d6-59aba925a1c1"
 API_BASE        = "https://api-1.sitedocs.com/api/v1"
 PAGE_SIZE       = 100
 RATE_LIMIT_WAIT = 1.0   # seconds between API calls
 
-DB_CONN = dict(
-    host     = os.environ["POSTGRES_HOST"],
-    dbname   = os.environ["POSTGRES_DB"],
-    user     = os.environ["POSTGRES_USER"],
-    password = os.environ["POSTGRES_PASSWORD"],
-    port     = int(os.environ.get("POSTGRES_PORT", 5432)),
-    sslmode  = "require",
-)
 
-HEADERS = {
-    "Authorization": SITEDOCS_TOKEN,
-    "Accept": "application/json",
-}
+def _get_token() -> str:
+    token = os.environ.get("SITEDOCS_API_TOKEN")
+    if not token:
+        raise RuntimeError("SITEDOCS_API_TOKEN is not set — add it to your .env or environment")
+    return token
+
+
+def _get_db_conn_kwargs() -> dict:
+    required = ["POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"]
+    missing = [v for v in required if not os.environ.get(v)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+    return dict(
+        host     = os.environ["POSTGRES_HOST"],
+        dbname   = os.environ["POSTGRES_DB"],
+        user     = os.environ["POSTGRES_USER"],
+        password = os.environ["POSTGRES_PASSWORD"],
+        port     = int(os.environ.get("POSTGRES_PORT", 5432)),
+        sslmode  = "require",
+    )
+
+
+def _get_headers() -> dict:
+    return {
+        "Authorization": _get_token(),
+        "Accept": "application/json",
+    }
 
 # ---------------------------------------------------------------------------
 # API helpers
@@ -55,7 +77,7 @@ HEADERS = {
 def api_get(path: str, params: dict = None) -> dict | list:
     url = f"{API_BASE}{path}"
     for attempt in range(4):
-        resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        resp = requests.get(url, headers=_get_headers(), params=params, timeout=30)
         if resp.status_code == 429:
             wait = 2 ** attempt * 5
             log.warning(f"Rate limited, waiting {wait}s")
@@ -409,7 +431,7 @@ def sync_time_tickets(since: Optional[str] = None):
     forms = fetch_all_time_ticket_forms(since=since)
     log.info(f"Found {len(forms)} time ticket forms to process")
 
-    conn = psycopg2.connect(**DB_CONN)
+    conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
     errors = 0
 

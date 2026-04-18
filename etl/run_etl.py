@@ -35,10 +35,12 @@ import logging
 import argparse
 from datetime import datetime, timezone
 
-# Load .env for local dev
+# Load .env for local dev. `override=True` so .env wins over any stale
+# shell vars (e.g. leftover `$env:POSTGRES_HOST` from a previous session).
+# No-op in Azure where no .env file exists.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass
 

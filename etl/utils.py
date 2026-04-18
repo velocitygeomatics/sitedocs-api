@@ -10,11 +10,41 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+# Load .env for local dev before anything reads os.environ. override=True
+# ensures .env wins over stale shell vars (e.g. leftover $env:POSTGRES_HOST
+# from a previous PowerShell session). In Azure there's no .env file so this
+# is a silent no-op.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    # python-dotenv is in requirements.txt; warn loudly if missing locally
+    import sys
+    print(
+        "WARNING: python-dotenv not installed — .env will NOT be loaded.\n"
+        "Run: pip install python-dotenv",
+        file=sys.stderr,
+    )
+
 import requests
 import psycopg2
 import psycopg2.extras
 
 log = logging.getLogger(__name__)
+
+
+def _require_env(name: str) -> str:
+    """Read an env var; fail fast with a clear message if missing or a
+    known placeholder value from .env.example."""
+    val = os.environ.get(name, "").strip()
+    placeholders = {"", "your-host", "your-db", "your-user", "your-password",
+                    "replace-me", "your-api-key", "your-token"}
+    if val.lower() in placeholders:
+        raise RuntimeError(
+            f"{name} is not set (or still has a placeholder value). "
+            f"Edit .env at the project root and fill in a real value."
+        )
+    return val
 
 # ---------------------------------------------------------------------------
 # Config
@@ -27,15 +57,15 @@ RATE_LIMIT_S = 0.5   # seconds between calls
 
 
 def get_token() -> str:
-    return os.environ["SITEDOCS_API_TOKEN"]
+    return _require_env("SITEDOCS_API_TOKEN")
 
 
 def get_db_conn():
     return psycopg2.connect(
-        host     = os.environ["POSTGRES_HOST"],
-        dbname   = os.environ["POSTGRES_DB"],
-        user     = os.environ["POSTGRES_USER"],
-        password = os.environ["POSTGRES_PASSWORD"],
+        host     = _require_env("POSTGRES_HOST"),
+        dbname   = _require_env("POSTGRES_DB"),
+        user     = _require_env("POSTGRES_USER"),
+        password = _require_env("POSTGRES_PASSWORD"),
         port     = int(os.environ.get("POSTGRES_PORT", 5432)),
         sslmode  = "require",
     )
