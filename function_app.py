@@ -1086,70 +1086,47 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
     })
 
 
-@app.timer_trigger(
-    schedule="0 30 * * * *",     # Every hour at :30 — PDF sync to SharePoint
-    arg_name="pdfSyncTimer",
-    run_on_startup=False,
-)
-def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
+def _run_pdf_sync() -> dict:
     """
     Upload new time ticket PDFs to SharePoint Invoice folders.
-    Runs every hour at :30 (30 min after the incremental ETL at :00).
-    Uses vg-ticket-sync.py logic inline — no subprocess needed.
+    Returns {"success": n, "skipped": n, "failed": n, "pending": n}.
     """
-    import os, re, time
+    import os, time
     import requests as req_lib
     import psycopg2
     import psycopg2.extras
     from shared.db import _get_secret
 
-    logging.info("Hourly PDF sync starting...")
+    logging.info("PDF sync starting...")
 
-    # Credentials — fetch each one with explicit error context so a KV/config
-    # problem is obvious in App Insights instead of an opaque "Failed" status.
-    tenant_id    = os.environ.get("SP_TENANT_ID",     "9d71e5ea-6164-445b-99c7-cc5b6b1f9e3a")
-    client_id    = os.environ.get("SP_CLIENT_ID",     "76d8a182-c87a-4df5-a888-a7f48ae9ff3e")
-    company_id   = os.environ.get("SITEDOCS_COMPANY_ID", "48651caf-50e4-45ab-875a-dfe02fa14441")
+    tenant_id  = os.environ.get("SP_TENANT_ID",        "9d71e5ea-6164-445b-99c7-cc5b6b1f9e3a")
+    client_id  = os.environ.get("SP_CLIENT_ID",        "76d8a182-c87a-4df5-a888-a7f48ae9ff3e")
+    company_id = os.environ.get("SITEDOCS_COMPANY_ID", "48651caf-50e4-45ab-875a-dfe02fa14441")
 
-    try:
-        client_secret = _get_secret("SP_CLIENT_SECRET")
-    except Exception as e:
-        logging.error(f"PDF sync aborting: _get_secret('SP_CLIENT_SECRET') threw: {type(e).__name__}: {e}")
-        return
-
-    try:
-        sd_token = _get_secret("SITEDOCS_API_TOKEN")
-    except Exception as e:
-        logging.error(f"PDF sync aborting: _get_secret('SITEDOCS_API_TOKEN') threw: {type(e).__name__}: {e}")
-        return
+    client_secret = _get_secret("SP_CLIENT_SECRET")
+    sd_token      = _get_secret("SITEDOCS_API_TOKEN")
 
     if not client_secret:
-        logging.error("PDF sync aborting: SP_CLIENT_SECRET is empty (check Key Vault / App Settings)")
-        return
+        raise RuntimeError("SP_CLIENT_SECRET is empty — check App Settings")
     if not sd_token:
-        logging.error("PDF sync aborting: SITEDOCS_API_TOKEN is empty (check Key Vault / App Settings)")
-        return
+        raise RuntimeError("SITEDOCS_API_TOKEN is empty — check App Settings")
 
     GRAPH_BASE  = "https://graph.microsoft.com/v1.0"
     SP_HOSTNAME = "velocitygeomaticsinc.sharepoint.com"
 
-    # Get Graph token
     token_resp = req_lib.post(
         f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
         data={"grant_type": "client_credentials", "client_id": client_id,
               "client_secret": client_secret, "scope": "https://graph.microsoft.com/.default"}
     )
     if not token_resp.ok:
-        logging.error(f"PDF sync: failed to get SP token: {token_resp.text}")
-        return
+        raise RuntimeError(f"Failed to get SP token: {token_resp.text}")
     sp_token = token_resp.json()["access_token"]
     headers  = {"Authorization": f"Bearer {sp_token}", "Accept": "application/json"}
 
-    # Get drive ID
     site_resp = req_lib.get(f"{GRAPH_BASE}/sites/{SP_HOSTNAME}:/", headers=headers)
     if not site_resp.ok:
-        logging.error(f"PDF sync: failed to get site: {site_resp.text}")
-        return
+        raise RuntimeError(f"Failed to get SharePoint site: {site_resp.text}")
     site_id = site_resp.json()["id"]
 
     drives_resp = req_lib.get(f"{GRAPH_BASE}/sites/{site_id}/drives", headers=headers)
@@ -1159,10 +1136,8 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
             drive_id = d["id"]
             break
     if not drive_id:
-        logging.error("PDF sync: Documents drive not found")
-        return
+        raise RuntimeError("Documents drive not found in SharePoint site")
 
-    # Get pending tickets from DB
     conn = psycopg2.connect(
         host=os.environ["POSTGRES_HOST"], dbname=os.environ["POSTGRES_DB"],
         user=os.environ["POSTGRES_USER"], password=_get_secret("POSTGRES_PASSWORD"),
@@ -1183,7 +1158,7 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
         """)
         tickets = [dict(r) for r in cur.fetchall()]
 
-    logging.info(f"PDF sync: {len(tickets)} ticket(s) to upload")
+    logging.info(f"PDF sync: {len(tickets)} ticket(s) pending")
     success = failed = skipped = 0
 
     for ticket in tickets:
@@ -1198,7 +1173,6 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
         sp_path     = f"{folder_path}/{filename}"
 
         try:
-            # Fetch PDF from SiteDocs
             pdf_resp = req_lib.get(
                 f"https://api-1.sitedocs.com/api/v1/export/pdf/company/{company_id}/form/{fid}",
                 headers={"Authorization": sd_token}, timeout=30
@@ -1208,7 +1182,6 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
                 continue
             pdf_resp.raise_for_status()
 
-            # Ensure folder exists
             parts = folder_path.split("/")
             parent_id = "root"
             built = ""
@@ -1226,7 +1199,6 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
                     if cr.status_code in (200, 201):
                         parent_id = cr.json()["id"]
 
-            # Upload PDF
             up = req_lib.put(
                 f"{GRAPH_BASE}/drives/{drive_id}/root:/{sp_path}:/content",
                 headers={**headers, "Content-Type": "application/pdf"},
@@ -1234,7 +1206,6 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
             )
             up.raise_for_status()
 
-            # Mark uploaded
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE time_tickets SET sp_uploaded=true, sp_uploaded_on=NOW(), sp_path=%s WHERE form_id=%s",
@@ -1249,4 +1220,34 @@ def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
             failed += 1
 
     conn.close()
+    result = {"success": success, "skipped": skipped, "failed": failed, "pending": len(tickets)}
     logging.info(f"PDF sync complete: {success} uploaded / {skipped} skipped / {failed} failed")
+    return result
+
+
+@app.timer_trigger(
+    schedule="0 30 * * * *",
+    arg_name="pdfSyncTimer",
+    run_on_startup=False,
+)
+def hourly_pdf_sync(pdfSyncTimer: func.TimerRequest) -> None:
+    """Upload new time ticket PDFs to SharePoint. Runs every hour at :30."""
+    try:
+        _run_pdf_sync()
+    except Exception as e:
+        logging.error(f"PDF sync failed: {e}")
+
+
+@app.route(route="pdf-sync/trigger", methods=["POST"])
+@require_api_key
+def trigger_pdf_sync(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST /api/pdf-sync/trigger
+    Manually trigger the PDF sync. Runs synchronously and returns results.
+    """
+    try:
+        result = _run_pdf_sync()
+        return ok(result)
+    except Exception as e:
+        logging.error(f"PDF sync trigger failed: {e}")
+        return error(500, str(e))
