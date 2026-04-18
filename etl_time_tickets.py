@@ -232,6 +232,9 @@ def _date(val: Optional[str]) -> Optional[str]:
     if re.match(r'^\d{4}-\d{2}-\d{2}$', val):
         return val
 
+    # Insert missing space after comma: 'Feb 21,2026' → 'Feb 21, 2026'
+    val = re.sub(r'([a-zA-Z]),(\d)', r'\1, \2', val)
+
     # Strip ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
     cleaned = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', val)
 
