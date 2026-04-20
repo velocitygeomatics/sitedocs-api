@@ -9,22 +9,11 @@ Run standalone or import sync_time_tickets() into your main ETL.
 
 import os
 import re
-import sys
 import logging
 import time
 import json
 from datetime import datetime, timezone
 from typing import Optional
-
-# Ensure Azure's bundled .python_packages/ is on sys.path. When this module
-# is run as a subprocess (e.g. `python -m etl_time_tickets`), the child
-# doesn't inherit sys.path mutations from the parent process.
-_pkg = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    ".python_packages", "lib", "site-packages",
-)
-if os.path.isdir(_pkg) and _pkg not in sys.path:
-    sys.path.insert(0, _pkg)
 
 import requests
 import psycopg2
@@ -288,91 +277,32 @@ def _date_from_label(label: Optional[str]) -> Optional[str]:
     return None
 
 
-# Hard cap so a rogue /signatures response can never loop forever.
-SIGNATURES_PAGE_CAP = 50   # 50 × 100 rows = 5000 signatures max per batch sweep
-
-
-def fetch_signatures_batch(added_since: Optional[str] = None) -> dict[str, list[dict]]:
+def _extract_signature(content: dict) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
     """
-    Pull signatures in a single paged sweep and bucket them by
-    DocumentVersionId (= form_id). Passes `addedSince` through when given.
-
-    Safety guard: stops after SIGNATURES_PAGE_CAP pages even if the API keeps
-    returning full pages. If we hit the cap we log a warning and return what
-    we've got — the per-form fallback in the main loop will fill the gaps.
-
-    Returns: { form_id: [signature_dict, ...] }
+    Extract signature block: returns (name, datetime_str, lat, lng).
+    Signatures live in a dedicated Signatures section or as signature-type items.
     """
-    by_form: dict[str, list[dict]] = {}
-    page = 0
-    while page < SIGNATURES_PAGE_CAP:
-        params = {"count": PAGE_SIZE, "page": page}
-        if added_since:
-            params["addedSince"] = added_since
-        batch = api_get("/signatures", params)
-        if not batch:
-            break
-        for sig in batch:
-            fid = sig.get("DocumentVersionId")
-            if fid:
-                by_form.setdefault(fid, []).append(sig)
-        log.info(f"Fetched signatures page {page}: {len(batch)} signatures (forms so far: {len(by_form)})")
-        if len(batch) < PAGE_SIZE:
-            break
-        page += 1
-    if page >= SIGNATURES_PAGE_CAP:
-        log.warning(
-            f"Signature batch hit page cap ({SIGNATURES_PAGE_CAP}). "
-            f"Remaining forms will use the per-form fallback."
-        )
-    return by_form
+    for group in content.get("Groups", []):
+        group_title = (group.get("Title") or "").lower()
+        if "signature" in group_title:
+            for item in group.get("Items", []):
+                name = item.get("SignerName") or item.get("signerName")
+                dt   = item.get("SignedOn")   or item.get("signedOn")
+                lat  = item.get("Latitude")   or item.get("latitude")
+                lng  = item.get("Longitude")  or item.get("longitude")
+                if name:
+                    return (
+                        str(name),
+                        str(dt) if dt else None,
+                        _num(str(lat) if lat else None),
+                        _num(str(lng) if lng else None),
+                    )
+    return None, None, None, None
 
 
-def fetch_signatures_for_form(form_id: str) -> list[dict]:
-    """Fallback: pull signatures for a single form (used when a form isn't
-    in the batch map — e.g. because its signature pre-dates the addedSince
-    window or was missed by pagination)."""
-    try:
-        return api_get("/signatures", {"formId": form_id}) or []
-    except Exception as e:
-        log.warning(f"Per-form signature fetch failed for {form_id}: {e}")
-        return []
-
-
-def _pick_crew_chief_signature(
-    sigs: list[dict],
-) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
+def parse_time_ticket(form: dict, content: dict) -> dict:
     """
-    Given a list of SignatureViewModel dicts for a single form, pick the
-    Crew Chief's signature. Prefers SignatoryTitle == 'Crew Chief'; falls
-    back to the earliest-by-CreatedOn if no title match is found.
-    Returns: (name, iso_datetime, lat, lng).
-    """
-    if not sigs:
-        return None, None, None, None
-    cc = next(
-        (s for s in sigs if (s.get("SignatoryTitle") or "").strip().lower() == "crew chief"),
-        None,
-    )
-    s = cc or min(sigs, key=lambda x: x.get("CreatedOn") or "")
-    first = (s.get("SignatoryFirstName") or "").strip()
-    last  = (s.get("SignatoryLastName")  or "").strip()
-    name  = (first + " " + last).strip() or None
-    lat   = s.get("Latitude")
-    lng   = s.get("Longitude")
-    return (
-        name,
-        s.get("CreatedOn") or None,
-        float(lat) if lat is not None else None,
-        float(lng) if lng is not None else None,
-    )
-
-
-def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]] = None) -> dict:
-    """
-    Combine the FormViewModel, Content and the form's signature list into
-    a flat time_tickets row. `signatures` is a list of SignatureViewModel
-    dicts for this form_id (caller pre-fetches in a single batch).
+    Combine the FormViewModel and Content into a flat time_tickets row.
     """
     f = _extract_field
     label = form.get("Label") or ""
@@ -388,10 +318,6 @@ def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]
     atv_utv    = _extract_list_selection(f(content, "ATV/UTV/Snowmobile"))
     cc_subs    = _extract_list_selection(f(content, "Crew Chief Subsistence"))
     sa_subs    = _extract_list_selection(f(content, "SA Subsistence"))
-
-    # Signatures live on a separate endpoint (/api/v1/signatures) not
-    # inside Content.Groups[]. Caller passes the pre-fetched list.
-    signed_by, signed_on, sig_lat, sig_lng = _pick_crew_chief_signature(signatures or [])
 
     return {
         "form_id":              form["Id"],
@@ -440,11 +366,11 @@ def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]
         "approval":             f(content, "Approval"),
         "approval_date":        _date(f(content, "Approval Date")),
 
-        # Signature
-        "signed_by":            signed_by,
-        "signed_on":            signed_on,
-        "signature_lat":        sig_lat,
-        "signature_lng":        sig_lng,
+        # Signature — populated by UPDATE from form_signatures after sync
+        "signed_by":            None,
+        "signed_on":            None,
+        "signature_lat":        None,
+        "signature_lng":        None,
 
         "etl_synced_on":        datetime.now(timezone.utc).isoformat(),
     }
@@ -574,29 +500,10 @@ def sync_time_tickets(since: Optional[str] = None):
     forms = fetch_all_time_ticket_forms(since=since)
     log.info(f"Found {len(forms)} time ticket forms to process")
 
-    # Decide how to fetch signatures:
-    #   - For small incremental runs (< BATCH_THRESHOLD forms) the per-form
-    #     call is actually cheaper: N API calls vs a full paged sweep of
-    #     /signatures that may return thousands of rows company-wide.
-    #   - For larger runs (full sync / big catch-up) the batch sweep with
-    #     `addedSince` wins because we'd otherwise make one extra call
-    #     per form.
-    BATCH_THRESHOLD = 20
-    sigs_by_form: dict[str, list[dict]] = {}
-    if len(forms) >= BATCH_THRESHOLD:
-        log.info(f"Fetching signatures batch (addedSince={since})…")
-        sigs_by_form = fetch_signatures_batch(added_since=since)
-        log.info(f"Signature batch covers {len(sigs_by_form)} forms "
-                 f"({sum(len(v) for v in sigs_by_form.values())} signatures)")
-    else:
-        log.info(f"Skipping signatures batch — only {len(forms)} forms; "
-                 f"per-form fetch is cheaper.")
-
     conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
     errors = 0
     upserted = 0
-    sig_fallbacks = 0
 
     for i, form in enumerate(forms):
         form_id = form["Id"]
@@ -605,14 +512,7 @@ def sync_time_tickets(since: Optional[str] = None):
             # content may come back as a JSON string (SiteDocs quirk)
             if isinstance(content, str):
                 content = json.loads(content)
-            sigs = sigs_by_form.get(form_id)
-            if sigs is None:
-                # Not in the batch sweep (e.g. signed before `since`, or a
-                # pagination miss). Fall back to a per-form call so we never
-                # silently lose a signature.
-                sigs = fetch_signatures_for_form(form_id)
-                sig_fallbacks += 1
-            row = parse_time_ticket(form, content, signatures=sigs)
+            row = parse_time_ticket(form, content)
             batch.append(row)
 
             if len(batch) >= 50:
@@ -633,6 +533,25 @@ def sync_time_tickets(since: Optional[str] = None):
     if batch:
         upserted += flush_batch(conn, batch)
 
+    # Populate signature fields from form_signatures table
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE time_tickets tt
+                SET signed_by     = fs.signatory_first_name || ' ' || fs.signatory_last_name,
+                    signed_on     = fs.created_on::text,
+                    signature_lat = fs.latitude,
+                    signature_lng = fs.longitude
+                FROM form_signatures fs
+                WHERE fs.form_id = tt.form_id
+                  AND fs.is_deleted = false
+            """)
+        conn.commit()
+        log.info("  time_tickets: signature fields updated from form_signatures")
+    except Exception as e:
+        conn.rollback()
+        log.warning(f"  time_tickets: signature update failed: {e}")
+
     # Record sync time so --mode new works correctly next run
     try:
         from etl.utils import set_last_sync, ensure_state_table
@@ -642,10 +561,7 @@ def sync_time_tickets(since: Optional[str] = None):
         log.warning(f"Could not update etl_sync_state for time_tickets: {e}")
 
     conn.close()
-    log.info(
-        f"Sync complete. upserted={upserted}, fetch_errors={errors}, "
-        f"total_forms={len(forms)}, signature_fallbacks={sig_fallbacks}"
-    )
+    log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(forms)}")
 
 
 if __name__ == "__main__":

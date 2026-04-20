@@ -469,7 +469,33 @@ CREATE INDEX IF NOT EXISTS idx_tt_location_id  ON time_tickets (location_id);
 CREATE INDEX IF NOT EXISTS idx_tt_submitted_on ON time_tickets (submitted_on);
 
 -- ============================================================
--- 14. ETL STATE TRACKING
+-- 14. FORM SIGNATURES
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS form_signatures (
+    id                       UUID PRIMARY KEY,
+    form_id                  UUID NOT NULL,
+    employee_id              UUID,
+    image_id                 UUID,
+    created_on               TIMESTAMPTZ,
+    last_modified_on         TIMESTAMPTZ,
+    is_deleted               BOOLEAN DEFAULT FALSE,
+    latitude                 DOUBLE PRECISION,
+    longitude                DOUBLE PRECISION,
+    signatory_first_name     TEXT,
+    signatory_last_name      TEXT,
+    signatory_title          TEXT,
+    signatory_type           INTEGER,
+    signatory_contractor_id  UUID,
+    signatory_contractor_name TEXT,
+    approval_status          INTEGER,
+    etl_synced_on            TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_form_signatures_form_id ON form_signatures (form_id);
+
+-- ============================================================
+-- 15. ETL STATE TRACKING
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS etl_sync_state (
