@@ -1044,8 +1044,7 @@ def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
         )
         logging.info(f"  forms: exit={result.returncode}")
         if result.stdout:
-            for line in result.stdout.strip().splitlines()[-10:]:
-                logging.info(f"  forms: {line}")
+            logging.info(f"  forms stdout: {result.stdout[-2000:]}")
         if result.returncode != 0:
             logging.error(f"  forms stderr: {result.stderr[-500:]}")
     except Exception as e:
@@ -1079,7 +1078,10 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
 
     # Run async so the HTTP response returns immediately
     def run():
-        subprocess.run(cmd, timeout=3600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        logging.info(f"ETL trigger stdout: {result.stdout[-2000:]}")
+        if result.returncode != 0:
+            logging.error(f"ETL trigger stderr: {result.stderr[-1000:]}")
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
