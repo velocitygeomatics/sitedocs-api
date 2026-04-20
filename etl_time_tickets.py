@@ -319,8 +319,6 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
     cc_subs    = _extract_list_selection(f(content, "Crew Chief Subsistence"))
     sa_subs    = _extract_list_selection(f(content, "SA Subsistence"))
 
-    signed_by, signed_on, sig_lat, sig_lng = _extract_signature(content)
-
     return {
         "form_id":              form["Id"],
         "form_label":           label,
@@ -368,11 +366,11 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
         "approval":             f(content, "Approval"),
         "approval_date":        _date(f(content, "Approval Date")),
 
-        # Signature
-        "signed_by":            signed_by,
-        "signed_on":            signed_on,
-        "signature_lat":        sig_lat,
-        "signature_lng":        sig_lng,
+        # Signature — populated by UPDATE from form_signatures after sync
+        "signed_by":            None,
+        "signed_on":            None,
+        "signature_lat":        None,
+        "signature_lng":        None,
 
         "etl_synced_on":        datetime.now(timezone.utc).isoformat(),
     }
@@ -534,6 +532,25 @@ def sync_time_tickets(since: Optional[str] = None):
 
     if batch:
         upserted += flush_batch(conn, batch)
+
+    # Populate signature fields from form_signatures table
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE time_tickets tt
+                SET signed_by     = fs.signatory_first_name || ' ' || fs.signatory_last_name,
+                    signed_on     = fs.created_on::text,
+                    signature_lat = fs.latitude,
+                    signature_lng = fs.longitude
+                FROM form_signatures fs
+                WHERE fs.form_id = tt.form_id
+                  AND fs.is_deleted = false
+            """)
+        conn.commit()
+        log.info("  time_tickets: signature fields updated from form_signatures")
+    except Exception as e:
+        conn.rollback()
+        log.warning(f"  time_tickets: signature update failed: {e}")
 
     # Record sync time so --mode new works correctly next run
     try:
