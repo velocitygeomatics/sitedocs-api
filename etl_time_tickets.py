@@ -288,19 +288,24 @@ def _date_from_label(label: Optional[str]) -> Optional[str]:
     return None
 
 
+# Hard cap so a rogue /signatures response can never loop forever.
+SIGNATURES_PAGE_CAP = 50   # 50 × 100 rows = 5000 signatures max per batch sweep
+
+
 def fetch_signatures_batch(added_since: Optional[str] = None) -> dict[str, list[dict]]:
     """
-    Pull every signature the company has (or every signature since `added_since`)
-    in a single paged sweep, and bucket them by DocumentVersionId (= form_id).
+    Pull signatures in a single paged sweep and bucket them by
+    DocumentVersionId (= form_id). Passes `addedSince` through when given.
 
-    The SiteDocs `GET /api/v1/signatures` endpoint accepts `addedSince` and
-    returns paged `SignatureViewModel` objects — we fetch them once per ETL
-    run instead of per-form to avoid hundreds of extra HTTP calls.
+    Safety guard: stops after SIGNATURES_PAGE_CAP pages even if the API keeps
+    returning full pages. If we hit the cap we log a warning and return what
+    we've got — the per-form fallback in the main loop will fill the gaps.
+
     Returns: { form_id: [signature_dict, ...] }
     """
     by_form: dict[str, list[dict]] = {}
     page = 0
-    while True:
+    while page < SIGNATURES_PAGE_CAP:
         params = {"count": PAGE_SIZE, "page": page}
         if added_since:
             params["addedSince"] = added_since
@@ -315,6 +320,11 @@ def fetch_signatures_batch(added_since: Optional[str] = None) -> dict[str, list[
         if len(batch) < PAGE_SIZE:
             break
         page += 1
+    if page >= SIGNATURES_PAGE_CAP:
+        log.warning(
+            f"Signature batch hit page cap ({SIGNATURES_PAGE_CAP}). "
+            f"Remaining forms will use the per-form fallback."
+        )
     return by_form
 
 
@@ -564,13 +574,23 @@ def sync_time_tickets(since: Optional[str] = None):
     forms = fetch_all_time_ticket_forms(since=since)
     log.info(f"Found {len(forms)} time ticket forms to process")
 
-    # Pre-fetch every signature in the relevant window in one paged sweep,
-    # keyed by form_id. For the common incremental case we pass `since`
-    # through as `addedSince`; full sync pulls everything (no filter).
-    log.info("Fetching signatures batch…")
-    sigs_by_form = fetch_signatures_batch(added_since=since)
-    log.info(f"Signature batch covers {len(sigs_by_form)} forms "
-             f"({sum(len(v) for v in sigs_by_form.values())} signatures)")
+    # Decide how to fetch signatures:
+    #   - For small incremental runs (< BATCH_THRESHOLD forms) the per-form
+    #     call is actually cheaper: N API calls vs a full paged sweep of
+    #     /signatures that may return thousands of rows company-wide.
+    #   - For larger runs (full sync / big catch-up) the batch sweep with
+    #     `addedSince` wins because we'd otherwise make one extra call
+    #     per form.
+    BATCH_THRESHOLD = 20
+    sigs_by_form: dict[str, list[dict]] = {}
+    if len(forms) >= BATCH_THRESHOLD:
+        log.info(f"Fetching signatures batch (addedSince={since})…")
+        sigs_by_form = fetch_signatures_batch(added_since=since)
+        log.info(f"Signature batch covers {len(sigs_by_form)} forms "
+                 f"({sum(len(v) for v in sigs_by_form.values())} signatures)")
+    else:
+        log.info(f"Skipping signatures batch — only {len(forms)} forms; "
+                 f"per-form fetch is cheaper.")
 
     conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
