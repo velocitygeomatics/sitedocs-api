@@ -469,7 +469,17 @@ CREATE INDEX IF NOT EXISTS idx_tt_location_id  ON time_tickets (location_id);
 CREATE INDEX IF NOT EXISTS idx_tt_submitted_on ON time_tickets (submitted_on);
 
 -- ============================================================
--- 14. FORM SIGNATURES
+-- 14. FORM CONTENTS (raw JSONB cache)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS form_contents (
+    form_id     UUID PRIMARY KEY REFERENCES forms(id),
+    raw_content JSONB NOT NULL,
+    fetched_on  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
+-- 15. FORM SIGNATURES
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS form_signatures (
