@@ -59,9 +59,10 @@ from . import (
     sync_equipment,
     sync_certifications,
     sync_forms,
+    sync_form_contents,
+    sync_signatures,
     sync_incidents,
     sync_attachments,
-    sync_signatures,
 )
 from etl_time_tickets import sync_time_tickets
 
@@ -71,7 +72,6 @@ from etl_time_tickets import sync_time_tickets
 # ---------------------------------------------------------------------------
 
 def _build_stages(mode: str, conn):
-    since = get_last_sync(conn, "time_tickets") if mode == "new" else None
     return [
         ("lookups",        sync_lookups.run),
         ("companies",      sync_companies.run),
@@ -79,10 +79,11 @@ def _build_stages(mode: str, conn):
         ("equipment",      sync_equipment.run),
         ("certifications", sync_certifications.run),
         ("forms",          sync_forms.run),
+        ("form_contents",  sync_form_contents.run),
         ("signatures",     sync_signatures.run),
         ("incidents",      sync_incidents.run),
         ("attachments",    sync_attachments.run),
-        ("time_tickets",   lambda conn: sync_time_tickets(since=since)),
+        ("time_tickets",   lambda conn: sync_time_tickets()),
     ]
 
 
@@ -158,7 +159,7 @@ if __name__ == "__main__":
         "--only",
         help="Run a single stage only (e.g. --only workers)",
         choices=["lookups","companies","workers","equipment","certifications",
-                 "forms","signatures","incidents","attachments","time_tickets"],
+                 "forms","form_contents","signatures","incidents","attachments","time_tickets"],
         default=None,
     )
     parser.add_argument(

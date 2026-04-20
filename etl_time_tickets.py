@@ -494,24 +494,45 @@ def flush_batch(conn, batch: list[dict]) -> int:
 
 def sync_time_tickets(since: Optional[str] = None):
     """
-    Full or incremental sync.
-    Pass since='2026-01-01T00:00:00Z' for incremental.
+    Build time_tickets from form_contents table (no API calls).
+    form_contents must be synced first via sync_form_contents stage.
     """
-    log.info(f"Starting time ticket sync (since={since or 'full'})")
-
-    forms = fetch_all_time_ticket_forms(since=since)
-    log.info(f"Found {len(forms)} time ticket forms to process")
+    log.info("Starting time ticket sync (from form_contents cache)...")
 
     conn = psycopg2.connect(**_get_db_conn_kwargs())
+
+    # Load all time ticket forms + their cached content in one query
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT
+                f.id AS "Id", f.label AS "Label", f.location_id AS "LocationId",
+                f.created_on AS "CreatedOn", f.is_deleted AS "IsDeleted",
+                fc.raw_content
+            FROM forms f
+            JOIN form_contents fc ON fc.form_id = f.id
+            WHERE f.document_template_id = %s
+              AND f.is_deleted = false
+            ORDER BY f.created_on
+        """, (FORM_TYPE_ID,))
+        rows = cur.fetchall()
+
+    log.info(f"Found {len(rows)} time ticket forms in form_contents cache")
+
     batch = []
     errors = 0
     upserted = 0
 
-    for i, form in enumerate(forms):
-        form_id = form["Id"]
+    for i, db_row in enumerate(rows):
+        form_id = str(db_row["Id"])
         try:
-            content = fetch_form_content(form_id)
-            # content may come back as a JSON string (SiteDocs quirk)
+            form = {
+                "Id":         form_id,
+                "Label":      db_row["Label"],
+                "LocationId": str(db_row["LocationId"]) if db_row["LocationId"] else None,
+                "CreatedOn":  db_row["CreatedOn"].isoformat() if db_row["CreatedOn"] else None,
+                "IsDeleted":  db_row["IsDeleted"],
+            }
+            content = db_row["raw_content"]
             if isinstance(content, str):
                 content = json.loads(content)
             row = parse_time_ticket(form, content)
@@ -519,7 +540,7 @@ def sync_time_tickets(since: Optional[str] = None):
 
             if len(batch) >= 50:
                 upserted += flush_batch(conn, batch)
-                log.info(f"Processed {i+1}/{len(forms)} forms (upserted={upserted})")
+                log.info(f"Processed {i+1}/{len(rows)} forms (upserted={upserted})")
                 batch = []
 
         except Exception as e:
