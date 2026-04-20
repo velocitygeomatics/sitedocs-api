@@ -535,6 +535,14 @@ def sync_time_tickets(since: Optional[str] = None):
     if batch:
         upserted += flush_batch(conn, batch)
 
+    # Record sync time so --mode new works correctly next run
+    try:
+        from etl.utils import set_last_sync, ensure_state_table
+        ensure_state_table(conn)
+        set_last_sync(conn, "time_tickets", upserted)
+    except Exception as e:
+        log.warning(f"Could not update etl_sync_state for time_tickets: {e}")
+
     conn.close()
     log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(forms)}")
 

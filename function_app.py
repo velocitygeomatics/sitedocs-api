@@ -1038,14 +1038,13 @@ def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
     import subprocess, sys
     logging.info("Hourly incremental sync starting...")
     try:
-        for stage in ["forms", "time_tickets"]:
-            result = subprocess.run(
-                [sys.executable, "-m", "etl.run_etl", "--only", stage, "--mode", "new"],
-                capture_output=True, text=True, timeout=600
-            )
-            logging.info(f"  {stage}: exit={result.returncode}")
-            if result.returncode != 0:
-                logging.error(f"  {stage} stderr: {result.stderr[-500:]}")
+        result = subprocess.run(
+            [sys.executable, "-m", "etl.run_etl", "--only", "forms", "--mode", "new"],
+            capture_output=True, text=True, timeout=540
+        )
+        logging.info(f"  forms: exit={result.returncode}")
+        if result.returncode != 0:
+            logging.error(f"  forms stderr: {result.stderr[-500:]}")
     except Exception as e:
         logging.error(f"Hourly sync failed: {e}")
 
