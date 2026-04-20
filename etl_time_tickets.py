@@ -288,32 +288,81 @@ def _date_from_label(label: Optional[str]) -> Optional[str]:
     return None
 
 
-def _extract_signature(content: dict) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
+def fetch_signatures_batch(added_since: Optional[str] = None) -> dict[str, list[dict]]:
     """
-    Extract signature block: returns (name, datetime_str, lat, lng).
-    Signatures live in a dedicated Signatures section or as signature-type items.
+    Pull every signature the company has (or every signature since `added_since`)
+    in a single paged sweep, and bucket them by DocumentVersionId (= form_id).
+
+    The SiteDocs `GET /api/v1/signatures` endpoint accepts `addedSince` and
+    returns paged `SignatureViewModel` objects — we fetch them once per ETL
+    run instead of per-form to avoid hundreds of extra HTTP calls.
+    Returns: { form_id: [signature_dict, ...] }
     """
-    for group in content.get("Groups", []):
-        group_title = (group.get("Title") or "").lower()
-        if "signature" in group_title:
-            for item in group.get("Items", []):
-                name = item.get("SignerName") or item.get("signerName")
-                dt   = item.get("SignedOn")   or item.get("signedOn")
-                lat  = item.get("Latitude")   or item.get("latitude")
-                lng  = item.get("Longitude")  or item.get("longitude")
-                if name:
-                    return (
-                        str(name),
-                        str(dt) if dt else None,
-                        _num(str(lat) if lat else None),
-                        _num(str(lng) if lng else None),
-                    )
-    return None, None, None, None
+    by_form: dict[str, list[dict]] = {}
+    page = 0
+    while True:
+        params = {"count": PAGE_SIZE, "page": page}
+        if added_since:
+            params["addedSince"] = added_since
+        batch = api_get("/signatures", params)
+        if not batch:
+            break
+        for sig in batch:
+            fid = sig.get("DocumentVersionId")
+            if fid:
+                by_form.setdefault(fid, []).append(sig)
+        log.info(f"Fetched signatures page {page}: {len(batch)} signatures (forms so far: {len(by_form)})")
+        if len(batch) < PAGE_SIZE:
+            break
+        page += 1
+    return by_form
 
 
-def parse_time_ticket(form: dict, content: dict) -> dict:
+def fetch_signatures_for_form(form_id: str) -> list[dict]:
+    """Fallback: pull signatures for a single form (used when a form isn't
+    in the batch map — e.g. because its signature pre-dates the addedSince
+    window or was missed by pagination)."""
+    try:
+        return api_get("/signatures", {"formId": form_id}) or []
+    except Exception as e:
+        log.warning(f"Per-form signature fetch failed for {form_id}: {e}")
+        return []
+
+
+def _pick_crew_chief_signature(
+    sigs: list[dict],
+) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
     """
-    Combine the FormViewModel and Content into a flat time_tickets row.
+    Given a list of SignatureViewModel dicts for a single form, pick the
+    Crew Chief's signature. Prefers SignatoryTitle == 'Crew Chief'; falls
+    back to the earliest-by-CreatedOn if no title match is found.
+    Returns: (name, iso_datetime, lat, lng).
+    """
+    if not sigs:
+        return None, None, None, None
+    cc = next(
+        (s for s in sigs if (s.get("SignatoryTitle") or "").strip().lower() == "crew chief"),
+        None,
+    )
+    s = cc or min(sigs, key=lambda x: x.get("CreatedOn") or "")
+    first = (s.get("SignatoryFirstName") or "").strip()
+    last  = (s.get("SignatoryLastName")  or "").strip()
+    name  = (first + " " + last).strip() or None
+    lat   = s.get("Latitude")
+    lng   = s.get("Longitude")
+    return (
+        name,
+        s.get("CreatedOn") or None,
+        float(lat) if lat is not None else None,
+        float(lng) if lng is not None else None,
+    )
+
+
+def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]] = None) -> dict:
+    """
+    Combine the FormViewModel, Content and the form's signature list into
+    a flat time_tickets row. `signatures` is a list of SignatureViewModel
+    dicts for this form_id (caller pre-fetches in a single batch).
     """
     f = _extract_field
     label = form.get("Label") or ""
@@ -330,7 +379,9 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
     cc_subs    = _extract_list_selection(f(content, "Crew Chief Subsistence"))
     sa_subs    = _extract_list_selection(f(content, "SA Subsistence"))
 
-    signed_by, signed_on, sig_lat, sig_lng = _extract_signature(content)
+    # Signatures live on a separate endpoint (/api/v1/signatures) not
+    # inside Content.Groups[]. Caller passes the pre-fetched list.
+    signed_by, signed_on, sig_lat, sig_lng = _pick_crew_chief_signature(signatures or [])
 
     return {
         "form_id":              form["Id"],
@@ -513,10 +564,19 @@ def sync_time_tickets(since: Optional[str] = None):
     forms = fetch_all_time_ticket_forms(since=since)
     log.info(f"Found {len(forms)} time ticket forms to process")
 
+    # Pre-fetch every signature in the relevant window in one paged sweep,
+    # keyed by form_id. For the common incremental case we pass `since`
+    # through as `addedSince`; full sync pulls everything (no filter).
+    log.info("Fetching signatures batch…")
+    sigs_by_form = fetch_signatures_batch(added_since=since)
+    log.info(f"Signature batch covers {len(sigs_by_form)} forms "
+             f"({sum(len(v) for v in sigs_by_form.values())} signatures)")
+
     conn = psycopg2.connect(**_get_db_conn_kwargs())
     batch = []
     errors = 0
     upserted = 0
+    sig_fallbacks = 0
 
     for i, form in enumerate(forms):
         form_id = form["Id"]
@@ -525,7 +585,14 @@ def sync_time_tickets(since: Optional[str] = None):
             # content may come back as a JSON string (SiteDocs quirk)
             if isinstance(content, str):
                 content = json.loads(content)
-            row = parse_time_ticket(form, content)
+            sigs = sigs_by_form.get(form_id)
+            if sigs is None:
+                # Not in the batch sweep (e.g. signed before `since`, or a
+                # pagination miss). Fall back to a per-form call so we never
+                # silently lose a signature.
+                sigs = fetch_signatures_for_form(form_id)
+                sig_fallbacks += 1
+            row = parse_time_ticket(form, content, signatures=sigs)
             batch.append(row)
 
             if len(batch) >= 50:
@@ -547,7 +614,10 @@ def sync_time_tickets(since: Optional[str] = None):
         upserted += flush_batch(conn, batch)
 
     conn.close()
-    log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(forms)}")
+    log.info(
+        f"Sync complete. upserted={upserted}, fetch_errors={errors}, "
+        f"total_forms={len(forms)}, signature_fallbacks={sig_fallbacks}"
+    )
 
 
 if __name__ == "__main__":

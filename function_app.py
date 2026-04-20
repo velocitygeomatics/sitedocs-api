@@ -876,6 +876,54 @@ def get_form_pdf(req: func.HttpRequest) -> func.HttpResponse:
         return error(502, "Failed to retrieve PDF from SiteDocs")
 
 
+@app.route(route="forms/{formId}/signatures", methods=["GET"])
+def get_form_signatures(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/forms/{formId}/signatures
+
+    Thin proxy over SiteDocs `GET /api/v1/signatures?formId={formId}`.
+    VG-Time's live path (browser) uses this to determine whether a
+    ticket has a Crew Chief signature — signatures don't live inside
+    /forms/content/{id}, they're on this separate endpoint.
+
+    Response: the raw SignatureViewModel array from SiteDocs.
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    form_id = req.route_params.get("formId")
+    if not form_id:
+        return error(400, "formId required")
+
+    import requests as req_lib
+    from shared.db import _get_secret
+
+    sitedocs_token = _get_secret("SITEDOCS_API_TOKEN")
+    sitedocs_url   = "https://api-1.sitedocs.com/api/v1/signatures"
+
+    try:
+        upstream = req_lib.get(
+            sitedocs_url,
+            params={"formId": form_id},
+            headers={"Authorization": sitedocs_token, "Accept": "application/json"},
+            timeout=20,
+        )
+        if upstream.status_code == 401:
+            return error(502, "SiteDocs authorization failed")
+        upstream.raise_for_status()
+        return func.HttpResponse(
+            body=upstream.content,
+            status_code=200,
+            mimetype="application/json",
+            headers={"Cache-Control": "private, max-age=60"},
+        )
+    except req_lib.exceptions.Timeout:
+        return error(504, "SiteDocs signatures request timed out")
+    except req_lib.exceptions.RequestException as e:
+        logging.error(f"Signatures proxy error for {form_id}: {e}")
+        return error(502, "Failed to retrieve signatures from SiteDocs")
+
+
 @app.route(route="forms/{formId}/viewer-url", methods=["GET"])
 def get_form_viewer_url(req: func.HttpRequest) -> func.HttpResponse:
     """
