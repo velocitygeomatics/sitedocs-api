@@ -584,7 +584,7 @@ def sync_time_tickets(since: Optional[str] = None):
         log.warning(f"Could not update etl_sync_state for time_tickets: {e}")
 
     conn.close()
-    log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(forms)}")
+    log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(rows)}")
 
 
 if __name__ == "__main__":
