@@ -1043,6 +1043,9 @@ def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
             capture_output=True, text=True, timeout=540
         )
         logging.info(f"  forms: exit={result.returncode}")
+        if result.stdout:
+            for line in result.stdout.strip().splitlines()[-10:]:
+                logging.info(f"  forms: {line}")
         if result.returncode != 0:
             logging.error(f"  forms stderr: {result.stderr[-500:]}")
     except Exception as e:
