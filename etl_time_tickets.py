@@ -229,8 +229,10 @@ def _date(val: Optional[str]) -> Optional[str]:
     if re.match(r'^\d{4}-\d{2}-\d{2}$', val):
         return val
 
-    # Insert missing space after comma: 'Feb 21,2026' → 'Feb 21, 2026'
-    val = re.sub(r'([a-zA-Z]),(\d)', r'\1, \2', val)
+    # Insert missing space after comma: 'Feb 22,2026' → 'Feb 22, 2026'
+    val = re.sub(r',(\d)', r', \1', val)
+    # Insert missing space between month and day: 'March10, 2026' → 'March 10, 2026'
+    val = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', val)
 
     # Strip ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
     cleaned = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', val)
@@ -539,7 +541,7 @@ def sync_time_tickets(since: Optional[str] = None):
             cur.execute("""
                 UPDATE time_tickets tt
                 SET signed_by     = fs.signatory_first_name || ' ' || fs.signatory_last_name,
-                    signed_on     = fs.created_on::text,
+                    signed_on     = fs.created_on,
                     signature_lat = fs.latitude,
                     signature_lng = fs.longitude
                 FROM form_signatures fs
