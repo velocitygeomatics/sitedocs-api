@@ -508,12 +508,11 @@ def sync_time_tickets(since: Optional[str] = None):
                 f.id AS "Id", f.label AS "Label", f.location_id AS "LocationId",
                 f.created_on AS "CreatedOn", f.is_deleted AS "IsDeleted",
                 fc.raw_content
-            FROM forms f
-            JOIN form_contents fc ON fc.form_id = f.id
-            WHERE f.document_template_id = %s
-              AND f.is_deleted = false
+            FROM form_contents fc
+            JOIN forms f ON f.id = fc.form_id
+            WHERE f.is_deleted = false
             ORDER BY f.created_on
-        """, (FORM_TYPE_ID,))
+        """)
         rows = cur.fetchall()
 
     log.info(f"Found {len(rows)} time ticket forms in form_contents cache")
