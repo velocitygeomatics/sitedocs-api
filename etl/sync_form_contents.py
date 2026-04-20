@@ -5,8 +5,10 @@ form_contents. Only fetches forms that are new or modified since last fetch.
 """
 
 import logging
+import json
+from datetime import datetime, timezone
 import psycopg2.extras
-from .utils import api_get, set_last_sync, now_iso
+from .utils import api_get, paginate, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -16,38 +18,54 @@ FORM_TYPE_ID = "6c3f93b6-1326-478b-a6d6-59aba925a1c1"  # Time Ticket
 def sync_form_contents(conn):
     log.info("Syncing form_contents...")
 
-    # Find time ticket forms that need content fetched:
-    # - not yet in form_contents, OR
-    # - form was modified after we last fetched its content
+    # Get all time ticket form IDs from the API (source of truth for which
+    # forms are time tickets — DB template ID is unreliable due to FK nulling)
+    api_forms = paginate("/forms", extra_params={"formTypeId": FORM_TYPE_ID})
+    api_form_map = {f["Id"]: f for f in api_forms}
+    log.info(f"  API returned {len(api_form_map)} time ticket forms")
+
+    if not api_form_map:
+        log.warning("  No time ticket forms returned from API — skipping")
+        return
+
+    # Check which ones we already have cached
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
-            SELECT f.id, f.last_modified_on
-            FROM forms f
-            LEFT JOIN form_contents fc ON fc.form_id = f.id
-            WHERE f.document_template_id = %s
-              AND f.is_deleted = false
-              AND (
-                fc.form_id IS NULL
-                OR f.last_modified_on > fc.fetched_on
-              )
-            ORDER BY f.created_on
-        """, (FORM_TYPE_ID,))
-        pending = cur.fetchall()
+            SELECT form_id::text, fetched_on
+            FROM form_contents
+            WHERE form_id = ANY(%s::uuid[])
+        """, (list(api_form_map.keys()),))
+        cached = {str(r["form_id"]): r["fetched_on"] for r in cur.fetchall()}
+
+    # Need fetch if: not cached, OR form modified after last fetch
+    pending = []
+    for fid, form in api_form_map.items():
+        last_modified = form.get("LastModifiedOn")
+        if fid not in cached:
+            pending.append(fid)
+        elif last_modified and cached[fid]:
+            try:
+                mod = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
+                fetched = cached[fid]
+                if fetched.tzinfo is None:
+                    fetched = fetched.replace(tzinfo=timezone.utc)
+                if mod > fetched:
+                    pending.append(fid)
+            except Exception:
+                pending.append(fid)
 
     log.info(f"  form_contents: {len(pending)} forms need content fetch")
 
     ok = skipped = errors = 0
     batch = []
 
-    for row in pending:
-        form_id = str(row["id"])
+    for i, form_id in enumerate(pending):
         try:
             content = api_get(f"/forms/content/{form_id}")
             if content is None:
                 skipped += 1
                 continue
 
-            import json
             if isinstance(content, str):
                 content = json.loads(content)
 
