@@ -493,6 +493,188 @@ def get_companies(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ===========================================================================
+# WORKERS
+# ===========================================================================
+
+@app.route(route="workers", methods=["GET"])
+def get_workers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/workers
+    Query params:
+      active     — true/false (default: any)
+      isExternal — true/false (default: any)
+      contractor — substring match on contractor_name
+      name       — substring match on first_name/last_name
+    Returns full list (table is small, < 200 rows).
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    conditions = []
+    params = []
+
+    active = req.params.get("active")
+    if active is not None:
+        conditions.append("w.active = %s")
+        params.append(active.lower() == "true")
+
+    is_external = req.params.get("isExternal")
+    if is_external is not None:
+        conditions.append("w.is_external = %s")
+        params.append(is_external.lower() == "true")
+
+    contractor = req.params.get("contractor")
+    if contractor:
+        conditions.append("w.contractor_name ILIKE %s")
+        params.append(f"%{contractor}%")
+
+    name = req.params.get("name")
+    if name:
+        conditions.append("(w.first_name ILIKE %s OR w.last_name ILIKE %s)")
+        params.extend([f"%{name}%", f"%{name}%"])
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = query(f"""
+        SELECT
+            w.id, w.first_name, w.last_name, w.job_title,
+            w.contractor_id, w.contractor_name,
+            w.email, w.mobile_number, w.phone_number,
+            w.active, w.is_external,
+            w.employee_number, w.date_hired,
+            w.created_on, w.last_modified_on
+        FROM workers w
+        {where}
+        ORDER BY w.last_name, w.first_name
+    """, tuple(params))
+    return ok(rows)
+
+
+@app.route(route="workers/{id}", methods=["GET"])
+def get_worker(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/workers/{id}"""
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    worker_id = req.route_params.get("id")
+    rows = query("""
+        SELECT
+            w.id, w.first_name, w.last_name, w.job_title,
+            w.contractor_id, w.contractor_name,
+            w.email, w.mobile_number, w.phone_number,
+            w.active, w.is_external,
+            w.employee_number, w.date_hired,
+            w.street_address, w.city, w.postal_code,
+            w.emergency_contact1, w.emergency_contact2, w.emergency_notes,
+            w.created_on, w.last_modified_on
+        FROM workers w
+        WHERE w.id = %s
+    """, (worker_id,))
+
+    if not rows:
+        return not_found("Worker")
+    return ok(rows[0])
+
+
+# ===========================================================================
+# CERTIFICATIONS
+# ===========================================================================
+
+@app.route(route="certifications", methods=["GET"])
+def get_certifications(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/certifications
+    Query params:
+      workerId       — filter by worker UUID
+      typeId         — filter by certification_type_id
+      isArchived     — true/false (default: any)
+      expiringWithin — integer days; e.g. 30 returns certs expiring within 30 days
+    Returns full list with worker name joined.
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    conditions = []
+    params = []
+
+    worker_id = req.params.get("workerId")
+    if worker_id:
+        conditions.append("c.worker_id = %s")
+        params.append(worker_id)
+
+    type_id = req.params.get("typeId")
+    if type_id:
+        conditions.append("c.certification_type_id = %s")
+        params.append(type_id)
+
+    is_archived = req.params.get("isArchived")
+    if is_archived is not None:
+        conditions.append("c.is_archived = %s")
+        params.append(is_archived.lower() == "true")
+
+    expiring_within = req.params.get("expiringWithin")
+    if expiring_within:
+        try:
+            days = int(expiring_within)
+            conditions.append("c.expires IS NOT NULL AND c.expires <= NOW() + (%s || ' days')::interval")
+            params.append(str(days))
+        except ValueError:
+            pass
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = query(f"""
+        SELECT
+            c.id,
+            c.worker_id,
+            w.first_name AS worker_first_name,
+            w.last_name  AS worker_last_name,
+            (w.first_name || ' ' || w.last_name) AS worker_name,
+            c.certification_type_id,
+            c.certification_type_name,
+            c.issuer, c.ticket,
+            c.acquired, c.expires, c.acknowledged_expiry_date,
+            c.is_archived,
+            c.created_on, c.last_modified_on
+        FROM certifications c
+        LEFT JOIN workers w ON w.id = c.worker_id
+        {where}
+        ORDER BY c.expires NULLS LAST, w.last_name, w.first_name
+    """, tuple(params))
+    return ok(rows)
+
+
+@app.route(route="certifications/{id}", methods=["GET"])
+def get_certification(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/certifications/{id}"""
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    cert_id = req.route_params.get("id")
+    rows = query("""
+        SELECT
+            c.id,
+            c.worker_id,
+            w.first_name AS worker_first_name,
+            w.last_name  AS worker_last_name,
+            (w.first_name || ' ' || w.last_name) AS worker_name,
+            c.certification_type_id,
+            c.certification_type_name,
+            c.issuer, c.ticket,
+            c.acquired, c.expires, c.acknowledged_expiry_date,
+            c.is_archived,
+            c.created_on, c.last_modified_on
+        FROM certifications c
+        LEFT JOIN workers w ON w.id = c.worker_id
+        WHERE c.id = %s
+    """, (cert_id,))
+
+    if not rows:
+        return not_found("Certification")
+    return ok(rows[0])
+
+
+# ===========================================================================
 # TIME TICKETS
 # ===========================================================================
 
@@ -1306,3 +1488,38 @@ def trigger_pdf_sync(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"PDF sync trigger failed: {e}")
         return error(500, str(e))
+
+
+# ===========================================================================
+# KEEP-WARM TIMER
+# ===========================================================================
+
+@app.timer_trigger(
+    schedule="0 */4 * * * *",      # every 4 minutes — keep the worker warm
+    arg_name="warmTimer",
+    run_on_startup=False,
+)
+def keep_warm(warmTimer: func.TimerRequest) -> None:
+    """
+    Pings Postgres to keep the Function App worker warm and the DB
+    connection pool primed. Avoids 5-15s cold starts on Consumption plan.
+    """
+    try:
+        query("SELECT 1 AS ok")
+        logging.info("keep_warm: ok")
+    except Exception as e:
+        logging.error(f"keep_warm failed: {e}")
+
+
+# ===========================================================================
+# HEALTH
+# ===========================================================================
+
+@app.route(route="health", methods=["GET"])
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/health — unauthenticated lightweight check, also serves as warm ping."""
+    try:
+        query("SELECT 1")
+        return ok({"status": "ok"})
+    except Exception as e:
+        return error(503, f"db unreachable: {e}")
