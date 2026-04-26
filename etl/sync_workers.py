@@ -49,38 +49,42 @@ def sync_workers(conn):
 
 
 def sync_worker_locations(conn):
-    """
-    Fetch workers assigned to each location.
-    Skips any location_id not present in the locations table.
-    """
+    """Fetch locations assigned to each worker via /workers/{id}/locations, in parallel."""
     log.info("Syncing worker_locations...")
 
-    from .utils import api_get, paginate
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .utils import api_get
 
-    # Get valid location IDs already in DB
     with conn.cursor() as cur:
         cur.execute("SELECT id::text FROM locations")
         valid_location_ids = {row[0] for row in cur.fetchall()}
 
-    locations = paginate("/locations")
-    mapped = []
-    seen = set()
-    skipped = 0
+        cur.execute("SELECT id::text FROM workers")
+        worker_ids = [row[0] for row in cur.fetchall()]
 
-    for loc in locations:
-        lid = loc["Id"]
-        if lid not in valid_location_ids:
-            skipped += 1
-            continue
+    def _fetch(wid):
         try:
-            workers = paginate("/workers", extra_params={"locationId": lid})
-            for w in workers:
-                key = (w["Id"], lid)
-                if key not in seen:
-                    mapped.append({"worker_id": w["Id"], "location_id": lid})
-                    seen.add(key)
+            result = api_get(f"/workers/{wid}/locations")
+            return wid, result or []
         except Exception as e:
-            log.debug(f"  worker_locations skip for location {lid}: {e}")
+            log.debug(f"  worker_locations skip for worker {wid}: {e}")
+            return wid, []
+
+    mapped, seen, skipped = [], set(), 0
+    futures = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = [ex.submit(_fetch, wid) for wid in worker_ids]
+        for fut in as_completed(futures):
+            wid, locs = fut.result()
+            for loc in locs:
+                lid = str(loc.get("Id") or loc.get("LocationId") or "")
+                if not lid or lid not in valid_location_ids:
+                    skipped += 1
+                    continue
+                key = (wid, lid)
+                if key not in seen:
+                    mapped.append({"worker_id": wid, "location_id": lid})
+                    seen.add(key)
 
     if mapped:
         sql = """
@@ -90,7 +94,7 @@ def sync_worker_locations(conn):
         """
         try:
             with conn.cursor() as cur:
-                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=100)
+                psycopg2.extras.execute_batch(cur, sql, mapped, page_size=500)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -99,7 +103,7 @@ def sync_worker_locations(conn):
             log_etl_error(conn, "worker_locations", None, e)
 
     set_last_sync(conn, "worker_locations", len(mapped))
-    log.info(f"  worker_locations: {len(mapped)} rows ({skipped} locations skipped)")
+    log.info(f"  worker_locations: {len(mapped)} rows ({skipped} location refs skipped)")
 
 
 def run(conn):

@@ -511,8 +511,9 @@ def sync_time_tickets(since: Optional[str] = None):
             FROM form_contents fc
             JOIN forms f ON f.id = fc.form_id
             WHERE f.is_deleted = false
+              AND f.document_template_id = %s::uuid
             ORDER BY f.created_on
-        """)
+        """, (FORM_TYPE_ID,))
         rows = cur.fetchall()
 
     log.info(f"Found {len(rows)} time ticket forms in form_contents cache")

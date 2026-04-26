@@ -1242,20 +1242,42 @@ def _check_api_key(req: func.HttpRequest):
     arg_name="nightlyTimer",
     run_on_startup=False,
 )
+def _run_etl_streaming(label: str, args: list[str]) -> int:
+    """Run an ETL subprocess and stream its stdout/stderr line-by-line into
+    the host logger so each line lands in App Insights as it happens.
+    Returns the subprocess exit code (or -1 if it failed to launch)."""
+    import subprocess, sys
+    cmd = [sys.executable, "-m", "etl.run_etl", *args]
+    logging.info(f"{label}: starting ({' '.join(args) or 'full'})")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as e:
+        logging.error(f"{label}: failed to launch: {e}")
+        return -1
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            logging.info(f"{label} | {line}")
+
+    rc = proc.wait()
+    if rc == 0:
+        logging.info(f"{label}: completed (exit=0)")
+    else:
+        logging.error(f"{label}: failed (exit={rc})")
+    return rc
+
+
 def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
     """Full ETL sync — runs nightly at 2AM UTC."""
-    import subprocess, sys
-    logging.info("Nightly full ETL sync starting...")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "etl.run_etl"],
-            capture_output=True, text=True, timeout=3600
-        )
-        logging.info(f"ETL stdout: {result.stdout[-2000:]}")
-        if result.returncode != 0:
-            logging.error(f"ETL stderr: {result.stderr[-1000:]}")
-    except Exception as e:
-        logging.error(f"Nightly ETL failed: {e}")
+    _run_etl_streaming("nightly_full_sync", [])
 
 
 @app.timer_trigger(
@@ -1265,20 +1287,7 @@ def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
 )
 def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
     """Incremental forms + time tickets sync — runs every hour."""
-    import subprocess, sys
-    logging.info("Hourly incremental sync starting...")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "etl.run_etl", "--only", "forms", "--mode", "new"],
-            capture_output=True, text=True, timeout=540
-        )
-        logging.info(f"  forms: exit={result.returncode}")
-        if result.stdout:
-            logging.info(f"  forms stdout: {result.stdout[-2000:]}")
-        if result.returncode != 0:
-            logging.error(f"  forms stderr: {result.stderr[-500:]}")
-    except Exception as e:
-        logging.error(f"Hourly sync failed: {e}")
+    _run_etl_streaming("hourly_incremental_sync", ["--only", "forms", "--mode", "new"])
 
 
 @app.route(route="etl/trigger", methods=["POST"])
