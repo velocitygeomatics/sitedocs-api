@@ -1237,11 +1237,6 @@ def _check_api_key(req: func.HttpRequest):
 # SCHEDULED ETL TRIGGERS
 # ===========================================================================
 
-@app.timer_trigger(
-    schedule="0 0 2 * * *",        # 2:00 AM UTC daily — full sync
-    arg_name="nightlyTimer",
-    run_on_startup=False,
-)
 def _run_etl_streaming(label: str, args: list[str]) -> int:
     """Run an ETL subprocess and stream its stdout/stderr line-by-line into
     the host logger so each line lands in App Insights as it happens.
@@ -1275,6 +1270,11 @@ def _run_etl_streaming(label: str, args: list[str]) -> int:
     return rc
 
 
+@app.timer_trigger(
+    schedule="0 0 2 * * *",        # 2:00 AM UTC daily — full sync
+    arg_name="nightlyTimer",
+    run_on_startup=False,
+)
 def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
     """Full ETL sync — runs nightly at 2AM UTC."""
     _run_etl_streaming("nightly_full_sync", [])
