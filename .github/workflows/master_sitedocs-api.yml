@@ -29,20 +29,18 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies into .python_packages
-        # Azure Functions Python expects deps in .python_packages/lib/site-packages/
-        # so they're available at runtime. Installing into the runner's system
-        # Python doesn't reach Azure — they must be bundled into the zip.
+      - name: Create and start virtual environment
         run: |
-          python -m pip install --upgrade pip
-          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          python -m venv venv
+          source venv/bin/activate
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       # Optional: Add step to run tests here
 
       - name: Zip artifact for deployment
-        # Use "." (not "./*") so hidden directories like .python_packages/ are
-        # included. Exclude .git/ and venv/ since they're not needed at runtime.
-        run: zip -r release.zip . -x ".git/*" "venv/*" "*.zip"
+        run: zip release.zip ./* -r
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -74,4 +72,4 @@ jobs:
           app-name: 'sitedocs-api'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_BA4F54C971704E96AC6F409DBEF0BCA0 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_F99ECCE0BE3140D6B00F5FC1611658C3 }}
