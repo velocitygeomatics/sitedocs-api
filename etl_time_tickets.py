@@ -510,8 +510,9 @@ def sync_time_tickets(since: Optional[str] = None):
                 fc.raw_content
             FROM form_contents fc
             JOIN forms f ON f.id = fc.form_id
+            JOIN form_types ft ON ft.id = f.document_template_id
             WHERE f.is_deleted = false
-              AND f.document_template_id = %s::uuid
+              AND ft.document_template_id = %s::uuid
             ORDER BY f.created_on
         """, (FORM_TYPE_ID,))
         rows = cur.fetchall()
