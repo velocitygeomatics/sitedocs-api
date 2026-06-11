@@ -1270,14 +1270,64 @@ def _run_etl_streaming(label: str, args: list[str]) -> int:
     return rc
 
 
+# The old single nightly_full_sync timer ran every stage in one invocation.
+# Once the forms/form_contents backlog pushed the run past the 10-minute
+# Consumption-plan functionTimeout, the host killed it mid-forms every night
+# (observed 2026-06-08 onward), so the stages after forms never ran and the
+# backlog compounded. Stages now run as separate invocations, each with its
+# own 10-minute budget, staggered so they never overlap each other or the
+# :00 hourly incremental sync.
+
 @app.timer_trigger(
-    schedule="0 0 2 * * *",        # 2:00 AM UTC daily — full sync
-    arg_name="nightlyTimer",
+    schedule="0 5 2 * * *",        # 2:05 AM UTC — core entities (~1 min)
+    arg_name="nightlyEntitiesTimer",
     run_on_startup=False,
 )
-def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
-    """Full ETL sync — runs nightly at 2AM UTC."""
-    _run_etl_streaming("nightly_full_sync", [])
+def nightly_entities_sync(nightlyEntitiesTimer: func.TimerRequest) -> None:
+    """Nightly 1/5: lookups, companies, workers, equipment, certifications."""
+    for stage in ("lookups", "companies", "workers", "equipment", "certifications"):
+        _run_etl_streaming(f"nightly_entities_sync:{stage}", ["--only", stage])
+
+
+@app.timer_trigger(
+    schedule="0 20 2 * * *",       # 2:20 AM UTC — forms (incremental)
+    arg_name="nightlyFormsTimer",
+    run_on_startup=False,
+)
+def nightly_forms_sync(nightlyFormsTimer: func.TimerRequest) -> None:
+    """Nightly 2/5: form_types + forms."""
+    _run_etl_streaming("nightly_forms_sync", ["--only", "forms"])
+
+
+@app.timer_trigger(
+    schedule="0 35 2 * * *",       # 2:35 AM UTC — form details
+    arg_name="nightlyFormDetailsTimer",
+    run_on_startup=False,
+)
+def nightly_form_details_sync(nightlyFormDetailsTimer: func.TimerRequest) -> None:
+    """Nightly 3/5: form_contents, signatures, incidents."""
+    for stage in ("form_contents", "signatures", "incidents"):
+        _run_etl_streaming(f"nightly_form_details_sync:{stage}", ["--only", stage])
+
+
+@app.timer_trigger(
+    schedule="0 5 3 * * *",        # 3:05 AM UTC — attachments
+    arg_name="nightlyAttachmentsTimer",
+    run_on_startup=False,
+)
+def nightly_attachments_sync(nightlyAttachmentsTimer: func.TimerRequest) -> None:
+    """Nightly 4/5: attachments."""
+    _run_etl_streaming("nightly_attachments_sync", ["--only", "attachments"])
+
+
+@app.timer_trigger(
+    schedule="0 20 3 * * *",       # 3:20 AM UTC — time tickets (~7 min)
+    arg_name="nightlyTimeTicketsTimer",
+    run_on_startup=False,
+)
+def nightly_time_tickets_sync(nightlyTimeTicketsTimer: func.TimerRequest) -> None:
+    """Nightly 5/5: time tickets."""
+    _run_etl_streaming("nightly_time_tickets_sync", ["--only", "time_tickets"])
 
 
 @app.timer_trigger(
