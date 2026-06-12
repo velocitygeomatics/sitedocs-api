@@ -20,8 +20,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # remote-build runs pip install on Azure (Oryx) — without it the app
-      # ships with no dependencies and every function dies on import.
+      # The remote (Oryx) build runs pip install on Azure — without it the app
+      # ships with no dependencies and every function dies on import. With a
+      # publish-profile the action ignores remote-build and only honors the
+      # two scm/oryx flags below, so all three are set.
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
         id: deploy-to-function
@@ -31,4 +33,6 @@ jobs:
           package: '.'
           respect-funcignore: true
           remote-build: true
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_F99ECCE0BE3140D6B00F5FC1611658C3 }}
