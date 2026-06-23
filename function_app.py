@@ -807,7 +807,7 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     tables = ["locations","companies","workers","worker_locations",
               "certification_types","certifications",
@@ -827,9 +827,16 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             counts[tbl] = None
 
-    # Yesterday's snapshot for delta
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-    prev = query("SELECT entity, record_count FROM etl_daily_snapshot WHERE snapshot_date = %s", (yesterday,))
+    # Most recent snapshot before today, for the delta. Snapshots are written
+    # only when this endpoint runs, so they're sparse; requiring an exact
+    # "yesterday" row yields all-null whenever yesterday wasn't captured. Use
+    # the latest snapshot strictly before today instead.
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    prev = query(
+        "SELECT entity, record_count FROM etl_daily_snapshot "
+        "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM etl_daily_snapshot "
+        "WHERE snapshot_date < %s)",
+        (today_iso,))
     prev_counts = {r["entity"]: r["record_count"] for r in prev}
 
     # Build delta
@@ -880,7 +887,7 @@ def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     tables = ["locations","companies","workers","worker_locations",
               "certification_types","certifications",
@@ -899,10 +906,13 @@ def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             counts[tbl] = None
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    # Latest snapshot strictly before today (snapshots are sparse — see /status).
+    today_iso = datetime.now(timezone.utc).date().isoformat()
     prev = query(
-        "SELECT entity, record_count FROM etl_daily_snapshot WHERE snapshot_date = %s",
-        (yesterday,))
+        "SELECT entity, record_count FROM etl_daily_snapshot "
+        "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM etl_daily_snapshot "
+        "WHERE snapshot_date < %s)",
+        (today_iso,))
     prev_counts = {r["entity"]: r["record_count"] for r in prev}
     deltas = {tbl: (counts.get(tbl) - prev_counts.get(tbl))
               if counts.get(tbl) is not None and prev_counts.get(tbl) is not None
@@ -1241,7 +1251,8 @@ def _run_etl_streaming(label: str, args: list[str]) -> int:
     """Run an ETL subprocess and stream its stdout/stderr line-by-line into
     the host logger so each line lands in App Insights as it happens.
     Returns the subprocess exit code (or -1 if it failed to launch)."""
-    import subprocess, sys
+    import subprocess
+    import sys
     cmd = [sys.executable, "-m", "etl.run_etl", *args]
     logging.info(f"{label}: starting ({' '.join(args) or 'full'})")
     try:
@@ -1350,7 +1361,9 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    import subprocess, sys, threading
+    import subprocess
+    import sys
+    import threading
 
     try:
         body = req.get_json() or {}
@@ -1387,7 +1400,8 @@ def _run_pdf_sync() -> dict:
     Upload new time ticket PDFs to SharePoint Invoice folders.
     Returns {"success": n, "skipped": n, "failed": n, "pending": n}.
     """
-    import os, time
+    import os
+    import time
     import requests as req_lib
     import psycopg2
     import psycopg2.extras
