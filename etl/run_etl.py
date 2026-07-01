@@ -29,7 +29,6 @@ Usage:
     python -m etl.run_etl --dry-run
 """
 
-import os
 import sys
 import logging
 import argparse
@@ -51,7 +50,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("etl.orchestrator")
 
-from .utils import get_db_conn, ensure_state_table, log_etl_error, get_last_sync
+from .utils import get_db_conn, ensure_state_table, log_etl_error
 from . import (
     sync_lookups,
     sync_companies,

@@ -8,7 +8,6 @@ over known entity IDs already in the database.
 """
 
 import logging
-import psycopg2.extras
 from .utils import api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)

@@ -1,0 +1,13 @@
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E701",  # multiple-statements-on-one-line — intentional for `if auth: return auth` guards
+    "E402",  # module-import-not-at-top — needed for dotenv/path setup before imports
+]
+
+[lint.per-file-ignores]
+"etl/__init__.py" = ["F401"]     # re-exports for package interface
+"shared/__init__.py" = ["F401"]  # re-exports for package interface

@@ -76,8 +76,12 @@ def sync_forms(conn, incremental: bool = True):
         if tmpl_id and tmpl_id not in valid_template_ids:
             tmpl_id = template_guid_to_id.get(tmpl_id)
             if tmpl_id is None: nulled += 1
-        if loc_id     and loc_id     not in valid_location_ids: loc_id     = None; nulled += 1
-        if company_id and company_id not in valid_company_ids:  company_id = None; nulled += 1
+        if loc_id and loc_id not in valid_location_ids:
+            loc_id = None
+            nulled += 1
+        if company_id and company_id not in valid_company_ids:
+            company_id = None
+            nulled += 1
 
         mapped.append({
             "id":                           r["Id"],
