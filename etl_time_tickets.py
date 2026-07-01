@@ -444,10 +444,6 @@ ON CONFLICT (form_id) DO UPDATE SET
     details              = EXCLUDED.details,
     approval             = EXCLUDED.approval,
     approval_date        = EXCLUDED.approval_date,
-    signed_by            = EXCLUDED.signed_by,
-    signed_on            = EXCLUDED.signed_on,
-    signature_lat        = EXCLUDED.signature_lat,
-    signature_lng        = EXCLUDED.signature_lng,
     etl_synced_on        = EXCLUDED.etl_synced_on;
 """
 
@@ -557,18 +553,35 @@ def sync_time_tickets(since: Optional[str] = None):
     if batch:
         upserted += flush_batch(conn, batch)
 
-    # Populate signature fields from form_signatures table
+    # Populate signature fields from form_signatures table.
+    # First clear all signature columns so that forms whose signatures were
+    # all deleted don't retain stale data, then re-populate from active sigs.
+    # Use a subquery to prefer the Crew Chief signature, falling back to
+    # the earliest signature by created_on (matches old _pick_crew_chief_signature logic).
     try:
         with conn.cursor() as cur:
             cur.execute("""
+                UPDATE time_tickets
+                SET signed_by = NULL, signed_on = NULL,
+                    signature_lat = NULL, signature_lng = NULL
+            """)
+            cur.execute("""
                 UPDATE time_tickets tt
-                SET signed_by     = fs.signatory_first_name || ' ' || fs.signatory_last_name,
-                    signed_on     = fs.created_on,
-                    signature_lat = fs.latitude,
-                    signature_lng = fs.longitude
-                FROM form_signatures fs
-                WHERE fs.form_id = tt.form_id
-                  AND fs.is_deleted = false
+                SET signed_by     = NULLIF(TRIM(CONCAT_WS(' ', best.signatory_first_name, best.signatory_last_name)), ''),
+                    signed_on     = best.created_on,
+                    signature_lat = best.latitude,
+                    signature_lng = best.longitude
+                FROM (
+                    SELECT DISTINCT ON (form_id)
+                        form_id, signatory_first_name, signatory_last_name,
+                        created_on, latitude, longitude
+                    FROM form_signatures
+                    WHERE is_deleted = false
+                    ORDER BY form_id,
+                             CASE WHEN LOWER(TRIM(signatory_title)) = 'crew chief' THEN 0 ELSE 1 END,
+                             created_on
+                ) best
+                WHERE best.form_id = tt.form_id
             """)
         conn.commit()
         log.info("  time_tickets: signature fields updated from form_signatures")

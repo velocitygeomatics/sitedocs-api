@@ -85,8 +85,11 @@ def sync_form_contents(conn):
             if status == "ok":
                 batch.append(row)
                 if len(batch) >= FLUSH_EVERY:
-                    _flush(conn, batch)
-                    ok += len(batch)
+                    try:
+                        _flush(conn, batch)
+                        ok += len(batch)
+                    except Exception:
+                        errors += len(batch)
                     log.info(f"  form_contents: fetched {ok}/{total}")
                     batch = []
             elif status == "skip":
@@ -95,8 +98,11 @@ def sync_form_contents(conn):
                 errors += 1
 
     if batch:
-        _flush(conn, batch)
-        ok += len(batch)
+        try:
+            _flush(conn, batch)
+            ok += len(batch)
+        except Exception:
+            errors += len(batch)
 
     set_last_sync(conn, "form_contents", ok)
     log.info(f"  form_contents: {ok} fetched, {skipped} skipped, {errors} errors")
@@ -117,6 +123,7 @@ def _flush(conn, batch):
     except Exception as e:
         conn.rollback()
         log.error(f"  form_contents flush failed: {e}")
+        raise
 
 
 def run(conn):
