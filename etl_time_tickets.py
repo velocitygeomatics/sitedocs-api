@@ -554,10 +554,17 @@ def sync_time_tickets(since: Optional[str] = None):
         upserted += flush_batch(conn, batch)
 
     # Populate signature fields from form_signatures table.
+    # First clear all signature columns so that forms whose signatures were
+    # all deleted don't retain stale data, then re-populate from active sigs.
     # Use a subquery to prefer the Crew Chief signature, falling back to
     # the earliest signature by created_on (matches old _pick_crew_chief_signature logic).
     try:
         with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE time_tickets
+                SET signed_by = NULL, signed_on = NULL,
+                    signature_lat = NULL, signature_lng = NULL
+            """)
             cur.execute("""
                 UPDATE time_tickets tt
                 SET signed_by     = NULLIF(TRIM(CONCAT_WS(' ', best.signatory_first_name, best.signatory_last_name)), ''),
