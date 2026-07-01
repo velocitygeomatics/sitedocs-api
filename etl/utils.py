@@ -7,6 +7,7 @@ import os
 import time
 import logging
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,6 +56,9 @@ PAGE_SIZE    = 100
 RETRY_LIMIT  = 4
 RATE_LIMIT_S = 0.5   # seconds between calls
 
+_rate_lock = threading.Lock()
+_last_request_time = 0.0
+
 
 def get_token() -> str:
     return _require_env("SITEDOCS_API_TOKEN")
@@ -76,10 +80,19 @@ def get_db_conn():
 # ---------------------------------------------------------------------------
 
 def api_get(path: str, params: dict = None) -> list | dict:
+    global _last_request_time
     url = f"{API_BASE}{path}"
     headers = {"Authorization": get_token(), "Accept": "application/json"}
 
     for attempt in range(RETRY_LIMIT):
+        # Serialize rate-limiting across threads so 10 threads don't
+        # fire 10 requests simultaneously despite RATE_LIMIT_S.
+        with _rate_lock:
+            elapsed = time.time() - _last_request_time
+            if elapsed < RATE_LIMIT_S:
+                time.sleep(RATE_LIMIT_S - elapsed)
+            _last_request_time = time.time()
+
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=30)
 
@@ -93,7 +106,6 @@ def api_get(path: str, params: dict = None) -> list | dict:
                 return None
 
             resp.raise_for_status()
-            time.sleep(RATE_LIMIT_S)
             return resp.json()
 
         except requests.exceptions.Timeout:

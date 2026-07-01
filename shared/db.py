@@ -4,8 +4,10 @@ Shared database connection pool, auth middleware, and response helpers.
 """
 import os
 import json
+import threading
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from functools import wraps
 import azure.functions as func
 
@@ -42,17 +44,43 @@ def _get_secret(name: str) -> str:
     return os.environ.get(name, "")
 
 
+_pool = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool():
+    global _pool
+    if _pool is None or _pool.closed:
+        with _pool_lock:
+            if _pool is None or _pool.closed:
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=2,
+                    maxconn=10,
+                    host=_get_secret("POSTGRES_HOST"),
+                    dbname=_get_secret("POSTGRES_DB"),
+                    user=_get_secret("POSTGRES_USER"),
+                    password=_get_secret("POSTGRES_PASSWORD"),
+                    port=int(os.environ.get("POSTGRES_PORT", "5432")),
+                    sslmode="require",
+                    connect_timeout=10,
+                )
+    return _pool
+
+
 def get_connection():
-    """Return a new psycopg2 connection."""
-    return psycopg2.connect(
-        host=_get_secret("POSTGRES_HOST"),
-        dbname=_get_secret("POSTGRES_DB"),
-        user=_get_secret("POSTGRES_USER"),
-        password=_get_secret("POSTGRES_PASSWORD"),
-        port=int(os.environ.get("POSTGRES_PORT", "5432")),
-        sslmode="require",
-        connect_timeout=10,
-    )
+    """Get a connection from the pool. Caller must call release_connection() when done."""
+    return _get_pool().getconn()
+
+
+def release_connection(conn):
+    """Return a connection to the pool instead of closing it."""
+    try:
+        _get_pool().putconn(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def query(sql: str, params: tuple = None) -> list[dict]:
@@ -64,7 +92,7 @@ def query(sql: str, params: tuple = None) -> list[dict]:
             rows = cur.fetchall()
             return [dict(r) for r in rows]
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +106,7 @@ def require_api_key(func_handler):
         expected = _get_secret("API_KEY")
         provided = req.headers.get("X-API-Key", "")
         if not expected or provided != expected:
-            return error(401, "Unauthorized")
+            return error(401, "Unauthorized — invalid or missing X-API-Key header")
         return func_handler(req)
     return wrapper
 
