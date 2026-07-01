@@ -84,30 +84,34 @@ def sync_equipment_details(conn, equipments: list):
     log.info(f"  equipment_details: {len(mapped)} rows ({errors} errors)")
 
 
-def sync_equipment_locations(conn, equipments: list):
-    """Fetch locations assigned to each equipment."""
-    log.info("Syncing equipment_locations...")
-    mapped = []
-    seen = set()
-
+def _fetch_equipment_views(equipments: list) -> dict:
+    """Fetch /equipments/{id} once per equipment, returning {eid: detail}."""
+    views = {}
     for eq in equipments:
         eid = eq["EquipmentId"]
         try:
             detail = api_get(f"/equipments/{eid}")
-            if not detail:
-                continue
-
-            # EquipmentViewModel may contain a Locations array
-            for loc in detail.get("Locations") or []:
-                lid = loc.get("Id") or loc.get("LocationId")
-                if lid:
-                    key = (eid, lid)
-                    if key not in seen:
-                        mapped.append({"equipment_id": eid, "location_id": lid})
-                        seen.add(key)
-
+            if detail:
+                views[eid] = detail
         except Exception as e:
-            log.debug(f"  equipment_locations skip {eid}: {e}")
+            log.debug(f"  equipment view fetch skip {eid}: {e}")
+    return views
+
+
+def sync_equipment_locations(conn, views: dict):
+    """Extract locations from pre-fetched equipment views."""
+    log.info("Syncing equipment_locations...")
+    mapped = []
+    seen = set()
+
+    for eid, detail in views.items():
+        for loc in detail.get("Locations") or []:
+            lid = loc.get("Id") or loc.get("LocationId")
+            if lid:
+                key = (eid, lid)
+                if key not in seen:
+                    mapped.append({"equipment_id": eid, "location_id": lid})
+                    seen.add(key)
 
     if mapped:
         sql = """
@@ -129,29 +133,20 @@ def sync_equipment_locations(conn, equipments: list):
     log.info(f"  equipment_locations: {len(mapped)} rows")
 
 
-def sync_equipment_workers(conn, equipments: list):
-    """Fetch workers assigned to each equipment."""
+def sync_equipment_workers(conn, views: dict):
+    """Extract workers from pre-fetched equipment views."""
     log.info("Syncing equipment_workers...")
     mapped = []
     seen = set()
 
-    for eq in equipments:
-        eid = eq["EquipmentId"]
-        try:
-            detail = api_get(f"/equipments/{eid}")
-            if not detail:
-                continue
-
-            for w in detail.get("Workers") or []:
-                wid = w.get("Id") or w.get("WorkerId")
-                if wid:
-                    key = (eid, wid)
-                    if key not in seen:
-                        mapped.append({"equipment_id": eid, "worker_id": wid})
-                        seen.add(key)
-
-        except Exception as e:
-            log.debug(f"  equipment_workers skip {eid}: {e}")
+    for eid, detail in views.items():
+        for w in detail.get("Workers") or []:
+            wid = w.get("Id") or w.get("WorkerId")
+            if wid:
+                key = (eid, wid)
+                if key not in seen:
+                    mapped.append({"equipment_id": eid, "worker_id": wid})
+                    seen.add(key)
 
     if mapped:
         sql = """
@@ -176,5 +171,6 @@ def sync_equipment_workers(conn, equipments: list):
 def run(conn):
     equipments = sync_equipments(conn)
     sync_equipment_details(conn, equipments)
-    sync_equipment_locations(conn, equipments)
-    sync_equipment_workers(conn, equipments)
+    views = _fetch_equipment_views(equipments)
+    sync_equipment_locations(conn, views)
+    sync_equipment_workers(conn, views)
