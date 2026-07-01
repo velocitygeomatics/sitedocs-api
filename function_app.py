@@ -1238,7 +1238,7 @@ def _check_api_key(req: func.HttpRequest):
     from shared.db import _get_secret, error as err
     expected = _get_secret("API_KEY")
     provided = req.headers.get("X-API-Key", "")
-    if expected and provided != expected:
+    if not expected or provided != expected:
         return err(401, "Unauthorized — invalid or missing X-API-Key header")
     return None
 
@@ -1703,17 +1703,26 @@ def get_rates(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="rates/schedules", methods=["POST"])
 def add_schedule(req: func.HttpRequest) -> func.HttpResponse:
     """POST /api/rates/schedules — create a new rate schedule."""
+    auth = _check_api_key(req)
+    if auth: return auth
+
     try:
         data = req.get_json()
         name = data.get("name")
         key  = data.get("schedule_key")
         if not name or not key:
             return error(400, "name and schedule_key required")
-        
-        query(
-            "INSERT INTO vgt_rate_schedules (name, schedule_key) VALUES (%s, %s)",
-            (name, key)
-        )
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vgt_rate_schedules (name, schedule_key) VALUES (%s, %s)",
+                    (name, key)
+                )
+            conn.commit()
+        finally:
+            conn.close()
         return ok({"message": "Schedule created"})
     except Exception as e:
         return error(500, str(e))
@@ -1722,16 +1731,25 @@ def add_schedule(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="rates/schedules/{id}", methods=["PUT"])
 def update_schedule(req: func.HttpRequest) -> func.HttpResponse:
     """PUT /api/rates/schedules/{id} — update schedule name/key."""
+    auth = _check_api_key(req)
+    if auth: return auth
+
     try:
         sid = req.route_params.get("id")
         data = req.get_json()
         name = data.get("name")
         key  = data.get("schedule_key")
-        
-        query(
-            "UPDATE vgt_rate_schedules SET name = %s, schedule_key = %s WHERE id = %s",
-            (name, key, sid)
-        )
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vgt_rate_schedules SET name = %s, schedule_key = %s WHERE id = %s",
+                    (name, key, sid)
+                )
+            conn.commit()
+        finally:
+            conn.close()
         return ok({"message": "Schedule updated"})
     except Exception as e:
         return error(500, str(e))
@@ -1740,31 +1758,40 @@ def update_schedule(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="rates/items/{slug}/{sched_key}", methods=["PUT"])
 def update_rate(req: func.HttpRequest) -> func.HttpResponse:
     """PUT /api/rates/items/{slug}/{sched_key} — update a specific rate."""
+    auth = _check_api_key(req)
+    if auth: return auth
+
     try:
         slug = req.route_params.get("slug")
         sk   = req.route_params.get("sched_key")
         data = req.get_json()
         rate = data.get("rate")
         unit = data.get("unit")
-        
+
         # Get IDs
         item = query("SELECT id FROM vgt_rate_items WHERE slug = %s", (slug,))
         sched = query("SELECT id FROM vgt_rate_schedules WHERE schedule_key = %s", (sk,))
-        
+
         if not item or not sched:
             return error(404, "Item or Schedule not found")
-        
+
         iid = item[0]["id"]
         sid = sched[0]["id"]
-        
+
         # Upsert into junction table
-        query("""
-            INSERT INTO vgt_schedule_rates (schedule_id, item_id, rate, unit)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (schedule_id, item_id) 
-            DO UPDATE SET rate = EXCLUDED.rate, unit = EXCLUDED.unit
-        """, (sid, iid, rate, unit))
-        
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO vgt_schedule_rates (schedule_id, item_id, rate, unit)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (schedule_id, item_id)
+                    DO UPDATE SET rate = EXCLUDED.rate, unit = EXCLUDED.unit
+                """, (sid, iid, rate, unit))
+            conn.commit()
+        finally:
+            conn.close()
+
         return ok({"message": "Rate updated"})
     except Exception as e:
         return error(500, str(e))
