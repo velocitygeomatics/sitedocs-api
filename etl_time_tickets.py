@@ -518,10 +518,6 @@ ON CONFLICT (form_id) DO UPDATE SET
     details              = EXCLUDED.details,
     approval             = EXCLUDED.approval,
     approval_date        = EXCLUDED.approval_date,
-    signed_by            = EXCLUDED.signed_by,
-    signed_on            = EXCLUDED.signed_on,
-    signature_lat        = EXCLUDED.signature_lat,
-    signature_lng        = EXCLUDED.signature_lng,
     etl_synced_on        = EXCLUDED.etl_synced_on;
 """
 
@@ -573,24 +569,6 @@ def sync_time_tickets(since: Optional[str] = None):
     """
     log.info("Starting time ticket sync (from form_contents cache)...")
 
-    # Decide how to fetch signatures:
-    #   - For small incremental runs (< BATCH_THRESHOLD forms) the per-form
-    #     call is actually cheaper: N API calls vs a full paged sweep of
-    #     /signatures that may return thousands of rows company-wide.
-    #   - For larger runs (full sync / big catch-up) the batch sweep with
-    #     `addedSince` wins because we'd otherwise make one extra call
-    #     per form.
-    BATCH_THRESHOLD = 20
-    sigs_by_form: dict[str, list[dict]] = {}
-    if len(forms) >= BATCH_THRESHOLD:
-        log.info(f"Fetching signatures batch (addedSince={since})…")
-        sigs_by_form = fetch_signatures_batch(added_since=since)
-        log.info(f"Signature batch covers {len(sigs_by_form)} forms "
-                 f"({sum(len(v) for v in sigs_by_form.values())} signatures)")
-    else:
-        log.info(f"Skipping signatures batch — only {len(forms)} forms; "
-                 f"per-form fetch is cheaper.")
-
     conn = psycopg2.connect(**_get_db_conn_kwargs())
 
     # Load all time ticket forms + their cached content in one query
@@ -612,7 +590,6 @@ def sync_time_tickets(since: Optional[str] = None):
     batch = []
     errors = 0
     upserted = 0
-    sig_fallbacks = 0
 
     for i, db_row in enumerate(rows):
         form_id = str(db_row["Id"])
@@ -627,14 +604,7 @@ def sync_time_tickets(since: Optional[str] = None):
             content = db_row["raw_content"]
             if isinstance(content, str):
                 content = json.loads(content)
-            sigs = sigs_by_form.get(form_id)
-            if sigs is None:
-                # Not in the batch sweep (e.g. signed before `since`, or a
-                # pagination miss). Fall back to a per-form call so we never
-                # silently lose a signature.
-                sigs = fetch_signatures_for_form(form_id)
-                sig_fallbacks += 1
-            row = parse_time_ticket(form, content, signatures=sigs)
+            row = parse_time_ticket(form, content)
             batch.append(row)
 
             if len(batch) >= 50:
@@ -655,18 +625,28 @@ def sync_time_tickets(since: Optional[str] = None):
     if batch:
         upserted += flush_batch(conn, batch)
 
-    # Populate signature fields from form_signatures table
+    # Populate signature fields from form_signatures table.
+    # Use a subquery to prefer the Crew Chief signature, falling back to
+    # the earliest signature by created_on (matches old _pick_crew_chief_signature logic).
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE time_tickets tt
-                SET signed_by     = fs.signatory_first_name || ' ' || fs.signatory_last_name,
-                    signed_on     = fs.created_on,
-                    signature_lat = fs.latitude,
-                    signature_lng = fs.longitude
-                FROM form_signatures fs
-                WHERE fs.form_id = tt.form_id
-                  AND fs.is_deleted = false
+                SET signed_by     = NULLIF(TRIM(CONCAT_WS(' ', best.signatory_first_name, best.signatory_last_name)), ''),
+                    signed_on     = best.created_on,
+                    signature_lat = best.latitude,
+                    signature_lng = best.longitude
+                FROM (
+                    SELECT DISTINCT ON (form_id)
+                        form_id, signatory_first_name, signatory_last_name,
+                        created_on, latitude, longitude
+                    FROM form_signatures
+                    WHERE is_deleted = false
+                    ORDER BY form_id,
+                             CASE WHEN LOWER(TRIM(signatory_title)) = 'crew chief' THEN 0 ELSE 1 END,
+                             created_on
+                ) best
+                WHERE best.form_id = tt.form_id
             """)
         conn.commit()
         log.info("  time_tickets: signature fields updated from form_signatures")
@@ -684,10 +664,6 @@ def sync_time_tickets(since: Optional[str] = None):
 
     conn.close()
     log.info(f"Sync complete. upserted={upserted}, fetch_errors={errors}, total_forms={len(rows)}")
-    log.info(
-        f"Sync complete. upserted={upserted}, fetch_errors={errors}, "
-        f"total_forms={len(forms)}, signature_fallbacks={sig_fallbacks}"
-    )
 
 
 if __name__ == "__main__":
