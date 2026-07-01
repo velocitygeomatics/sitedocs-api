@@ -4,11 +4,9 @@ Shared database connection pool, auth middleware, and response helpers.
 """
 import os
 import json
-import logging
 import psycopg2
 import psycopg2.extras
 from functools import wraps
-from typing import Optional
 import azure.functions as func
 
 # Optional Key Vault support

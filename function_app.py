@@ -1644,13 +1644,17 @@ def get_rates(req: func.HttpRequest) -> func.HttpResponse:
                 }
             if row["schedule_key"]:
                 items_dict[slug]["rates"][row["schedule_key"]] = {
-                    "rate":              float(row["rate"])              if row["rate"]              is not None else None,
-                    "unit":              row["unit"],
-                    "minimum_qty":       float(row["minimum_qty"])       if row["minimum_qty"]       is not None else 0,
-                    "ot_multiplier":     float(row["ot_multiplier"])     if row["ot_multiplier"]     is not None else None,
-                    "ot_threshold":      float(row["ot_threshold"])      if row["ot_threshold"]      is not None else None,
-                    "markup_percentage": float(row["markup_percentage"]) if row["markup_percentage"] is not None else None,
-                    "day_rate_threshold":float(row["day_rate_threshold"])if row["day_rate_threshold"]is not None else None,
+                    "rate": float(row["rate"]) if row["rate"] is not None else None,
+                    "unit": row["unit"],
+                    "minimum_qty": float(row["minimum_qty"]) if row["minimum_qty"] is not None else 0,
+                    "ot_multiplier": float(row["ot_multiplier"]) if row["ot_multiplier"] is not None else None,
+                    "ot_threshold": float(row["ot_threshold"]) if row["ot_threshold"] is not None else None,
+                    "markup_percentage": (
+                        float(row["markup_percentage"]) if row["markup_percentage"] is not None else None
+                    ),
+                    "day_rate_threshold": (
+                        float(row["day_rate_threshold"]) if row["day_rate_threshold"] is not None else None
+                    ),
                 }
 
         # 3. Client → schedule map

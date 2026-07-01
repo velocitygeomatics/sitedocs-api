@@ -5,7 +5,9 @@ Fetches raw form content for given form IDs and dumps signature-related data.
 Usage:
     python scripts/probe_signatures.py <form_id1> <form_id2> ...
 """
-import sys, json, os
+import sys
+import json
+import os
 try:
     from dotenv import load_dotenv
     load_dotenv(override=True)

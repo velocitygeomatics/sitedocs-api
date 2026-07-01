@@ -567,7 +567,8 @@ def sync_time_tickets(since: Optional[str] = None):
             """)
             cur.execute("""
                 UPDATE time_tickets tt
-                SET signed_by     = NULLIF(TRIM(CONCAT_WS(' ', best.signatory_first_name, best.signatory_last_name)), ''),
+                SET signed_by     = NULLIF(TRIM(CONCAT_WS(' ',
+                                    best.signatory_first_name, best.signatory_last_name)), ''),
                     signed_on     = best.created_on,
                     signature_lat = best.latitude,
                     signature_lng = best.longitude

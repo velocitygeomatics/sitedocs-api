@@ -8,7 +8,7 @@ Syncs:
 """
 
 import logging
-from .utils import paginate, api_get, upsert, get_last_sync, set_last_sync, now_iso
+from .utils import paginate, api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
