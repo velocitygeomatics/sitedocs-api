@@ -9,22 +9,11 @@ Run standalone or import sync_time_tickets() into your main ETL.
 
 import os
 import re
-import sys
 import logging
 import time
 import json
 from datetime import datetime, timezone
 from typing import Optional
-
-# Ensure Azure's bundled .python_packages/ is on sys.path. When this module
-# is run as a subprocess (e.g. `python -m etl_time_tickets`), the child
-# doesn't inherit sys.path mutations from the parent process.
-_pkg = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    ".python_packages", "lib", "site-packages",
-)
-if os.path.isdir(_pkg) and _pkg not in sys.path:
-    sys.path.insert(0, _pkg)
 
 import requests
 import psycopg2
@@ -290,91 +279,32 @@ def _date_from_label(label: Optional[str]) -> Optional[str]:
     return None
 
 
-# Hard cap so a rogue /signatures response can never loop forever.
-SIGNATURES_PAGE_CAP = 50   # 50 × 100 rows = 5000 signatures max per batch sweep
-
-
-def fetch_signatures_batch(added_since: Optional[str] = None) -> dict[str, list[dict]]:
+def _extract_signature(content: dict) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
     """
-    Pull signatures in a single paged sweep and bucket them by
-    DocumentVersionId (= form_id). Passes `addedSince` through when given.
-
-    Safety guard: stops after SIGNATURES_PAGE_CAP pages even if the API keeps
-    returning full pages. If we hit the cap we log a warning and return what
-    we've got — the per-form fallback in the main loop will fill the gaps.
-
-    Returns: { form_id: [signature_dict, ...] }
+    Extract signature block: returns (name, datetime_str, lat, lng).
+    Signatures live in a dedicated Signatures section or as signature-type items.
     """
-    by_form: dict[str, list[dict]] = {}
-    page = 0
-    while page < SIGNATURES_PAGE_CAP:
-        params = {"count": PAGE_SIZE, "page": page}
-        if added_since:
-            params["addedSince"] = added_since
-        batch = api_get("/signatures", params)
-        if not batch:
-            break
-        for sig in batch:
-            fid = sig.get("DocumentVersionId")
-            if fid:
-                by_form.setdefault(fid, []).append(sig)
-        log.info(f"Fetched signatures page {page}: {len(batch)} signatures (forms so far: {len(by_form)})")
-        if len(batch) < PAGE_SIZE:
-            break
-        page += 1
-    if page >= SIGNATURES_PAGE_CAP:
-        log.warning(
-            f"Signature batch hit page cap ({SIGNATURES_PAGE_CAP}). "
-            f"Remaining forms will use the per-form fallback."
-        )
-    return by_form
+    for group in content.get("Groups", []):
+        group_title = (group.get("Title") or "").lower()
+        if "signature" in group_title:
+            for item in group.get("Items", []):
+                name = item.get("SignerName") or item.get("signerName")
+                dt   = item.get("SignedOn")   or item.get("signedOn")
+                lat  = item.get("Latitude")   or item.get("latitude")
+                lng  = item.get("Longitude")  or item.get("longitude")
+                if name:
+                    return (
+                        str(name),
+                        str(dt) if dt else None,
+                        _num(str(lat) if lat else None),
+                        _num(str(lng) if lng else None),
+                    )
+    return None, None, None, None
 
 
-def fetch_signatures_for_form(form_id: str) -> list[dict]:
-    """Fallback: pull signatures for a single form (used when a form isn't
-    in the batch map — e.g. because its signature pre-dates the addedSince
-    window or was missed by pagination)."""
-    try:
-        return api_get("/signatures", {"formId": form_id}) or []
-    except Exception as e:
-        log.warning(f"Per-form signature fetch failed for {form_id}: {e}")
-        return []
-
-
-def _pick_crew_chief_signature(
-    sigs: list[dict],
-) -> tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
+def parse_time_ticket(form: dict, content: dict) -> dict:
     """
-    Given a list of SignatureViewModel dicts for a single form, pick the
-    Crew Chief's signature. Prefers SignatoryTitle == 'Crew Chief'; falls
-    back to the earliest-by-CreatedOn if no title match is found.
-    Returns: (name, iso_datetime, lat, lng).
-    """
-    if not sigs:
-        return None, None, None, None
-    cc = next(
-        (s for s in sigs if (s.get("SignatoryTitle") or "").strip().lower() == "crew chief"),
-        None,
-    )
-    s = cc or min(sigs, key=lambda x: x.get("CreatedOn") or "")
-    first = (s.get("SignatoryFirstName") or "").strip()
-    last  = (s.get("SignatoryLastName")  or "").strip()
-    name  = (first + " " + last).strip() or None
-    lat   = s.get("Latitude")
-    lng   = s.get("Longitude")
-    return (
-        name,
-        s.get("CreatedOn") or None,
-        float(lat) if lat is not None else None,
-        float(lng) if lng is not None else None,
-    )
-
-
-def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]] = None) -> dict:
-    """
-    Combine the FormViewModel, Content and the form's signature list into
-    a flat time_tickets row. `signatures` is a list of SignatureViewModel
-    dicts for this form_id (caller pre-fetches in a single batch).
+    Combine the FormViewModel and Content into a flat time_tickets row.
     """
     f = _extract_field
     label = form.get("Label") or ""
@@ -390,10 +320,6 @@ def parse_time_ticket(form: dict, content: dict, signatures: Optional[list[dict]
     atv_utv    = _extract_list_selection(f(content, "ATV/UTV/Snowmobile"))
     cc_subs    = _extract_list_selection(f(content, "Crew Chief Subsistence"))
     sa_subs    = _extract_list_selection(f(content, "SA Subsistence"))
-
-    # Signatures live on a separate endpoint (/api/v1/signatures) not
-    # inside Content.Groups[]. Caller passes the pre-fetched list.
-    signed_by, signed_on, sig_lat, sig_lng = _pick_crew_chief_signature(signatures or [])
 
     return {
         "form_id":              form["Id"],
@@ -580,9 +506,11 @@ def sync_time_tickets(since: Optional[str] = None):
                 fc.raw_content
             FROM form_contents fc
             JOIN forms f ON f.id = fc.form_id
+            JOIN form_types ft ON ft.id = f.document_template_id
             WHERE f.is_deleted = false
+              AND ft.document_template_id = %s::uuid
             ORDER BY f.created_on
-        """)
+        """, (FORM_TYPE_ID,))
         rows = cur.fetchall()
 
     log.info(f"Found {len(rows)} time ticket forms in form_contents cache")

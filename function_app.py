@@ -493,6 +493,188 @@ def get_companies(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ===========================================================================
+# WORKERS
+# ===========================================================================
+
+@app.route(route="workers", methods=["GET"])
+def get_workers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/workers
+    Query params:
+      active     — true/false (default: any)
+      isExternal — true/false (default: any)
+      contractor — substring match on contractor_name
+      name       — substring match on first_name/last_name
+    Returns full list (table is small, < 200 rows).
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    conditions = []
+    params = []
+
+    active = req.params.get("active")
+    if active is not None:
+        conditions.append("w.active = %s")
+        params.append(active.lower() == "true")
+
+    is_external = req.params.get("isExternal")
+    if is_external is not None:
+        conditions.append("w.is_external = %s")
+        params.append(is_external.lower() == "true")
+
+    contractor = req.params.get("contractor")
+    if contractor:
+        conditions.append("w.contractor_name ILIKE %s")
+        params.append(f"%{contractor}%")
+
+    name = req.params.get("name")
+    if name:
+        conditions.append("(w.first_name ILIKE %s OR w.last_name ILIKE %s)")
+        params.extend([f"%{name}%", f"%{name}%"])
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = query(f"""
+        SELECT
+            w.id, w.first_name, w.last_name, w.job_title,
+            w.contractor_id, w.contractor_name,
+            w.email, w.mobile_number, w.phone_number,
+            w.active, w.is_external,
+            w.employee_number, w.date_hired,
+            w.created_on, w.last_modified_on
+        FROM workers w
+        {where}
+        ORDER BY w.last_name, w.first_name
+    """, tuple(params))
+    return ok(rows)
+
+
+@app.route(route="workers/{id}", methods=["GET"])
+def get_worker(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/workers/{id}"""
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    worker_id = req.route_params.get("id")
+    rows = query("""
+        SELECT
+            w.id, w.first_name, w.last_name, w.job_title,
+            w.contractor_id, w.contractor_name,
+            w.email, w.mobile_number, w.phone_number,
+            w.active, w.is_external,
+            w.employee_number, w.date_hired,
+            w.street_address, w.city, w.postal_code,
+            w.emergency_contact1, w.emergency_contact2, w.emergency_notes,
+            w.created_on, w.last_modified_on
+        FROM workers w
+        WHERE w.id = %s
+    """, (worker_id,))
+
+    if not rows:
+        return not_found("Worker")
+    return ok(rows[0])
+
+
+# ===========================================================================
+# CERTIFICATIONS
+# ===========================================================================
+
+@app.route(route="certifications", methods=["GET"])
+def get_certifications(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/certifications
+    Query params:
+      workerId       — filter by worker UUID
+      typeId         — filter by certification_type_id
+      isArchived     — true/false (default: any)
+      expiringWithin — integer days; e.g. 30 returns certs expiring within 30 days
+    Returns full list with worker name joined.
+    """
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    conditions = []
+    params = []
+
+    worker_id = req.params.get("workerId")
+    if worker_id:
+        conditions.append("c.worker_id = %s")
+        params.append(worker_id)
+
+    type_id = req.params.get("typeId")
+    if type_id:
+        conditions.append("c.certification_type_id = %s")
+        params.append(type_id)
+
+    is_archived = req.params.get("isArchived")
+    if is_archived is not None:
+        conditions.append("c.is_archived = %s")
+        params.append(is_archived.lower() == "true")
+
+    expiring_within = req.params.get("expiringWithin")
+    if expiring_within:
+        try:
+            days = int(expiring_within)
+            conditions.append("c.expires IS NOT NULL AND c.expires <= NOW() + (%s || ' days')::interval")
+            params.append(str(days))
+        except ValueError:
+            pass
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = query(f"""
+        SELECT
+            c.id,
+            c.worker_id,
+            w.first_name AS worker_first_name,
+            w.last_name  AS worker_last_name,
+            (w.first_name || ' ' || w.last_name) AS worker_name,
+            c.certification_type_id,
+            c.certification_type_name,
+            c.issuer, c.ticket,
+            c.acquired, c.expires, c.acknowledged_expiry_date,
+            c.is_archived,
+            c.created_on, c.last_modified_on
+        FROM certifications c
+        LEFT JOIN workers w ON w.id = c.worker_id
+        {where}
+        ORDER BY c.expires NULLS LAST, w.last_name, w.first_name
+    """, tuple(params))
+    return ok(rows)
+
+
+@app.route(route="certifications/{id}", methods=["GET"])
+def get_certification(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/certifications/{id}"""
+    auth = _check_api_key(req)
+    if auth: return auth
+
+    cert_id = req.route_params.get("id")
+    rows = query("""
+        SELECT
+            c.id,
+            c.worker_id,
+            w.first_name AS worker_first_name,
+            w.last_name  AS worker_last_name,
+            (w.first_name || ' ' || w.last_name) AS worker_name,
+            c.certification_type_id,
+            c.certification_type_name,
+            c.issuer, c.ticket,
+            c.acquired, c.expires, c.acknowledged_expiry_date,
+            c.is_archived,
+            c.created_on, c.last_modified_on
+        FROM certifications c
+        LEFT JOIN workers w ON w.id = c.worker_id
+        WHERE c.id = %s
+    """, (cert_id,))
+
+    if not rows:
+        return not_found("Certification")
+    return ok(rows[0])
+
+
+# ===========================================================================
 # TIME TICKETS
 # ===========================================================================
 
@@ -625,7 +807,7 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     tables = ["locations","companies","workers","worker_locations",
               "certification_types","certifications",
@@ -645,9 +827,16 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             counts[tbl] = None
 
-    # Yesterday's snapshot for delta
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-    prev = query("SELECT entity, record_count FROM etl_daily_snapshot WHERE snapshot_date = %s", (yesterday,))
+    # Most recent snapshot before today, for the delta. Snapshots are written
+    # only when this endpoint runs, so they're sparse; requiring an exact
+    # "yesterday" row yields all-null whenever yesterday wasn't captured. Use
+    # the latest snapshot strictly before today instead.
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    prev = query(
+        "SELECT entity, record_count FROM etl_daily_snapshot "
+        "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM etl_daily_snapshot "
+        "WHERE snapshot_date < %s)",
+        (today_iso,))
     prev_counts = {r["entity"]: r["record_count"] for r in prev}
 
     # Build delta
@@ -698,7 +887,7 @@ def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     tables = ["locations","companies","workers","worker_locations",
               "certification_types","certifications",
@@ -717,10 +906,13 @@ def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             counts[tbl] = None
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    # Latest snapshot strictly before today (snapshots are sparse — see /status).
+    today_iso = datetime.now(timezone.utc).date().isoformat()
     prev = query(
-        "SELECT entity, record_count FROM etl_daily_snapshot WHERE snapshot_date = %s",
-        (yesterday,))
+        "SELECT entity, record_count FROM etl_daily_snapshot "
+        "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM etl_daily_snapshot "
+        "WHERE snapshot_date < %s)",
+        (today_iso,))
     prev_counts = {r["entity"]: r["record_count"] for r in prev}
     deltas = {tbl: (counts.get(tbl) - prev_counts.get(tbl))
               if counts.get(tbl) is not None and prev_counts.get(tbl) is not None
@@ -1055,25 +1247,98 @@ def _check_api_key(req: func.HttpRequest):
 # SCHEDULED ETL TRIGGERS
 # ===========================================================================
 
+def _run_etl_streaming(label: str, args: list[str]) -> int:
+    """Run an ETL subprocess and stream its stdout/stderr line-by-line into
+    the host logger so each line lands in App Insights as it happens.
+    Returns the subprocess exit code (or -1 if it failed to launch)."""
+    import subprocess
+    import sys
+    cmd = [sys.executable, "-m", "etl.run_etl", *args]
+    logging.info(f"{label}: starting ({' '.join(args) or 'full'})")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as e:
+        logging.error(f"{label}: failed to launch: {e}")
+        return -1
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            logging.info(f"{label} | {line}")
+
+    rc = proc.wait()
+    if rc == 0:
+        logging.info(f"{label}: completed (exit=0)")
+    else:
+        logging.error(f"{label}: failed (exit={rc})")
+    return rc
+
+
+# The old single nightly_full_sync timer ran every stage in one invocation.
+# Once the forms/form_contents backlog pushed the run past the 10-minute
+# Consumption-plan functionTimeout, the host killed it mid-forms every night
+# (observed 2026-06-08 onward), so the stages after forms never ran and the
+# backlog compounded. Stages now run as separate invocations, each with its
+# own 10-minute budget, staggered so they never overlap each other or the
+# :00 hourly incremental sync.
+
 @app.timer_trigger(
-    schedule="0 0 2 * * *",        # 2:00 AM UTC daily — full sync
-    arg_name="nightlyTimer",
+    schedule="0 5 2 * * *",        # 2:05 AM UTC — core entities (~1 min)
+    arg_name="nightlyEntitiesTimer",
     run_on_startup=False,
 )
-def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
-    """Full ETL sync — runs nightly at 2AM UTC."""
-    import subprocess, sys
-    logging.info("Nightly full ETL sync starting...")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "etl.run_etl"],
-            capture_output=True, text=True, timeout=3600
-        )
-        logging.info(f"ETL stdout: {result.stdout[-2000:]}")
-        if result.returncode != 0:
-            logging.error(f"ETL stderr: {result.stderr[-1000:]}")
-    except Exception as e:
-        logging.error(f"Nightly ETL failed: {e}")
+def nightly_entities_sync(nightlyEntitiesTimer: func.TimerRequest) -> None:
+    """Nightly 1/5: lookups, companies, workers, equipment, certifications."""
+    for stage in ("lookups", "companies", "workers", "equipment", "certifications"):
+        _run_etl_streaming(f"nightly_entities_sync:{stage}", ["--only", stage])
+
+
+@app.timer_trigger(
+    schedule="0 20 2 * * *",       # 2:20 AM UTC — forms (incremental)
+    arg_name="nightlyFormsTimer",
+    run_on_startup=False,
+)
+def nightly_forms_sync(nightlyFormsTimer: func.TimerRequest) -> None:
+    """Nightly 2/5: form_types + forms."""
+    _run_etl_streaming("nightly_forms_sync", ["--only", "forms"])
+
+
+@app.timer_trigger(
+    schedule="0 35 2 * * *",       # 2:35 AM UTC — form details
+    arg_name="nightlyFormDetailsTimer",
+    run_on_startup=False,
+)
+def nightly_form_details_sync(nightlyFormDetailsTimer: func.TimerRequest) -> None:
+    """Nightly 3/5: form_contents, signatures, incidents."""
+    for stage in ("form_contents", "signatures", "incidents"):
+        _run_etl_streaming(f"nightly_form_details_sync:{stage}", ["--only", stage])
+
+
+@app.timer_trigger(
+    schedule="0 5 3 * * *",        # 3:05 AM UTC — attachments
+    arg_name="nightlyAttachmentsTimer",
+    run_on_startup=False,
+)
+def nightly_attachments_sync(nightlyAttachmentsTimer: func.TimerRequest) -> None:
+    """Nightly 4/5: attachments."""
+    _run_etl_streaming("nightly_attachments_sync", ["--only", "attachments"])
+
+
+@app.timer_trigger(
+    schedule="0 20 3 * * *",       # 3:20 AM UTC — time tickets (~7 min)
+    arg_name="nightlyTimeTicketsTimer",
+    run_on_startup=False,
+)
+def nightly_time_tickets_sync(nightlyTimeTicketsTimer: func.TimerRequest) -> None:
+    """Nightly 5/5: time tickets."""
+    _run_etl_streaming("nightly_time_tickets_sync", ["--only", "time_tickets"])
 
 
 @app.timer_trigger(
@@ -1083,20 +1348,7 @@ def nightly_full_sync(nightlyTimer: func.TimerRequest) -> None:
 )
 def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
     """Incremental forms + time tickets sync — runs every hour."""
-    import subprocess, sys
-    logging.info("Hourly incremental sync starting...")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "etl.run_etl", "--only", "forms", "--mode", "new"],
-            capture_output=True, text=True, timeout=540
-        )
-        logging.info(f"  forms: exit={result.returncode}")
-        if result.stdout:
-            logging.info(f"  forms stdout: {result.stdout[-2000:]}")
-        if result.returncode != 0:
-            logging.error(f"  forms stderr: {result.stderr[-500:]}")
-    except Exception as e:
-        logging.error(f"Hourly sync failed: {e}")
+    _run_etl_streaming("hourly_incremental_sync", ["--only", "forms", "--mode", "new"])
 
 
 @app.route(route="etl/trigger", methods=["POST"])
@@ -1109,7 +1361,9 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
     auth = _check_api_key(req)
     if auth: return auth
 
-    import subprocess, sys, threading
+    import subprocess
+    import sys
+    import threading
 
     try:
         body = req.get_json() or {}
@@ -1146,7 +1400,8 @@ def _run_pdf_sync() -> dict:
     Upload new time ticket PDFs to SharePoint Invoice folders.
     Returns {"success": n, "skipped": n, "failed": n, "pending": n}.
     """
-    import os, time
+    import os
+    import time
     import requests as req_lib
     import psycopg2
     import psycopg2.extras
@@ -1305,4 +1560,211 @@ def trigger_pdf_sync(req: func.HttpRequest) -> func.HttpResponse:
         return ok(result)
     except Exception as e:
         logging.error(f"PDF sync trigger failed: {e}")
+        return error(500, str(e))
+
+
+# ===========================================================================
+# KEEP-WARM TIMER
+# ===========================================================================
+
+@app.timer_trigger(
+    schedule="0 */4 * * * *",      # every 4 minutes — keep the worker warm
+    arg_name="warmTimer",
+    run_on_startup=False,
+)
+def keep_warm(warmTimer: func.TimerRequest) -> None:
+    """
+    Pings Postgres to keep the Function App worker warm and the DB
+    connection pool primed. Avoids 5-15s cold starts on Consumption plan.
+    """
+    try:
+        query("SELECT 1 AS ok")
+        logging.info("keep_warm: ok")
+    except Exception as e:
+        logging.error(f"keep_warm failed: {e}")
+
+
+# ===========================================================================
+# HEALTH
+# ===========================================================================
+
+@app.route(route="health", methods=["GET"])
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/health — unauthenticated lightweight check, also serves as warm ping."""
+    try:
+        query("SELECT 1")
+        return ok({"status": "ok"})
+    except Exception as e:
+        return error(503, f"db unreachable: {e}")
+
+
+# ===========================================================================
+# RATES  (VG Rate Engine)
+# ===========================================================================
+
+@app.route(route="rates", methods=["GET"])
+def get_rates(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/rates
+    Returns the full rate engine payload:
+      SCHEDULES   — vgt_rate_schedules
+      RATE_ITEMS  — vgt_rate_items joined to vgt_schedule_rates (grouped by slug)
+      CLIENT_MAP  — vgt_client_schedule_map joined to schedules
+      OVERRIDES   — vgt_client_rate_overrides per client (empty until populated)
+    No auth required — rates are read-only reference data consumed by VG-Time.
+    """
+    try:
+        # 1. Schedules
+        schedules = query(
+            "SELECT id, schedule_key, name, valid_from, valid_to, notes "
+            "FROM vgt_rate_schedules ORDER BY id"
+        )
+
+        # 2. Rate items + their per-schedule rates (grouped in Python)
+        items_raw = query("""
+            SELECT i.slug, i.line_item, i.category,
+                   s.schedule_key, sr.rate, sr.unit, sr.minimum_qty,
+                   sr.ot_multiplier, sr.ot_threshold,
+                   sr.markup_percentage, sr.day_rate_threshold
+            FROM vgt_rate_items i
+            LEFT JOIN vgt_schedule_rates sr ON i.id = sr.item_id
+            LEFT JOIN vgt_rate_schedules s  ON sr.schedule_id = s.id
+            ORDER BY i.id
+        """)
+
+        items_dict = {}
+        for row in items_raw:
+            slug = row["slug"]
+            if slug not in items_dict:
+                items_dict[slug] = {
+                    "slug":     slug,
+                    "lineItem": row["line_item"],
+                    "category": row["category"],
+                    "rates":    {}
+                }
+            if row["schedule_key"]:
+                items_dict[slug]["rates"][row["schedule_key"]] = {
+                    "rate":              float(row["rate"])              if row["rate"]              is not None else None,
+                    "unit":              row["unit"],
+                    "minimum_qty":       float(row["minimum_qty"])       if row["minimum_qty"]       is not None else 0,
+                    "ot_multiplier":     float(row["ot_multiplier"])     if row["ot_multiplier"]     is not None else None,
+                    "ot_threshold":      float(row["ot_threshold"])      if row["ot_threshold"]      is not None else None,
+                    "markup_percentage": float(row["markup_percentage"]) if row["markup_percentage"] is not None else None,
+                    "day_rate_threshold":float(row["day_rate_threshold"])if row["day_rate_threshold"]is not None else None,
+                }
+
+        # 3. Client → schedule map
+        client_map = query("""
+            SELECT c.client_name, s.schedule_key, s.name AS schedule_name,
+                   c.modifier_percentage, c.notes
+            FROM vgt_client_schedule_map c
+            LEFT JOIN vgt_rate_schedules s ON c.schedule_id = s.id
+            ORDER BY c.client_name
+        """)
+
+        # 4. Per-client item overrides
+        overrides_raw = query("""
+            SELECT c.client_name, i.slug, o.rate, o.unit, o.minimum_qty,
+                   o.ot_multiplier, o.ot_threshold,
+                   o.markup_percentage, o.day_rate_threshold
+            FROM vgt_client_rate_overrides o
+            JOIN vgt_client_schedule_map c ON o.client_id = c.id
+            JOIN vgt_rate_items          i ON o.item_id   = i.id
+            ORDER BY c.client_name, i.slug
+        """)
+
+        overrides = {}
+        for row in overrides_raw:
+            client = row["client_name"]
+            if client not in overrides:
+                overrides[client] = {}
+            overrides[client][row["slug"]] = {
+                "rate":              float(row["rate"])              if row["rate"]              is not None else None,
+                "unit":              row["unit"],
+                "minimum_qty":       float(row["minimum_qty"])       if row["minimum_qty"]       is not None else 0,
+                "ot_multiplier":     float(row["ot_multiplier"])     if row["ot_multiplier"]     is not None else None,
+                "ot_threshold":      float(row["ot_threshold"])      if row["ot_threshold"]      is not None else None,
+                "markup_percentage": float(row["markup_percentage"]) if row["markup_percentage"] is not None else None,
+                "day_rate_threshold":float(row["day_rate_threshold"])if row["day_rate_threshold"]is not None else None,
+            }
+
+        return ok({
+            "SCHEDULES":  schedules,
+            "RATE_ITEMS": list(items_dict.values()),
+            "CLIENT_MAP": client_map,
+            "OVERRIDES":  overrides,
+        })
+
+    except Exception as e:
+        logging.error(f"get_rates failed: {e}")
+        return error(503, str(e))
+
+
+@app.route(route="rates/schedules", methods=["POST"])
+def add_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """POST /api/rates/schedules — create a new rate schedule."""
+    try:
+        data = req.get_json()
+        name = data.get("name")
+        key  = data.get("schedule_key")
+        if not name or not key:
+            return error(400, "name and schedule_key required")
+        
+        query(
+            "INSERT INTO vgt_rate_schedules (name, schedule_key) VALUES (%s, %s)",
+            (name, key)
+        )
+        return ok({"message": "Schedule created"})
+    except Exception as e:
+        return error(500, str(e))
+
+
+@app.route(route="rates/schedules/{id}", methods=["PUT"])
+def update_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """PUT /api/rates/schedules/{id} — update schedule name/key."""
+    try:
+        sid = req.route_params.get("id")
+        data = req.get_json()
+        name = data.get("name")
+        key  = data.get("schedule_key")
+        
+        query(
+            "UPDATE vgt_rate_schedules SET name = %s, schedule_key = %s WHERE id = %s",
+            (name, key, sid)
+        )
+        return ok({"message": "Schedule updated"})
+    except Exception as e:
+        return error(500, str(e))
+
+
+@app.route(route="rates/items/{slug}/{sched_key}", methods=["PUT"])
+def update_rate(req: func.HttpRequest) -> func.HttpResponse:
+    """PUT /api/rates/items/{slug}/{sched_key} — update a specific rate."""
+    try:
+        slug = req.route_params.get("slug")
+        sk   = req.route_params.get("sched_key")
+        data = req.get_json()
+        rate = data.get("rate")
+        unit = data.get("unit")
+        
+        # Get IDs
+        item = query("SELECT id FROM vgt_rate_items WHERE slug = %s", (slug,))
+        sched = query("SELECT id FROM vgt_rate_schedules WHERE schedule_key = %s", (sk,))
+        
+        if not item or not sched:
+            return error(404, "Item or Schedule not found")
+        
+        iid = item[0]["id"]
+        sid = sched[0]["id"]
+        
+        # Upsert into junction table
+        query("""
+            INSERT INTO vgt_schedule_rates (schedule_id, item_id, rate, unit)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (schedule_id, item_id) 
+            DO UPDATE SET rate = EXCLUDED.rate, unit = EXCLUDED.unit
+        """, (sid, iid, rate, unit))
+        
+        return ok({"message": "Rate updated"})
+    except Exception as e:
         return error(500, str(e))

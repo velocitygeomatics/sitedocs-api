@@ -53,8 +53,13 @@ def sync_forms(conn, incremental: bool = True):
 
     # Get valid IDs for all FK targets to avoid constraint violations
     with conn.cursor() as cur:
-        cur.execute("SELECT id::text FROM form_types")
-        valid_template_ids = {r[0] for r in cur.fetchall()}
+        # forms.document_template_id FKs to form_types.id, but the SiteDocs API
+        # returns the template GUID (= form_types.document_template_id). Build a
+        # GUID -> form_types.id map so we can translate before storing.
+        cur.execute("SELECT id::text, document_template_id::text FROM form_types")
+        ft_rows = cur.fetchall()
+        valid_template_ids = {r[0] for r in ft_rows}
+        template_guid_to_id = {r[1]: r[0] for r in ft_rows if r[1]}
         cur.execute("SELECT id::text FROM locations")
         valid_location_ids = {r[0] for r in cur.fetchall()}
         cur.execute("SELECT company_id::text FROM companies")
@@ -67,7 +72,10 @@ def sync_forms(conn, incremental: bool = True):
         loc_id     = r.get("LocationId")
         company_id = r.get("CreatingCompanyId")
 
-        if tmpl_id    and tmpl_id    not in valid_template_ids: tmpl_id    = None; nulled += 1
+        # API gives the template GUID; translate to the form_types.id the FK needs.
+        if tmpl_id and tmpl_id not in valid_template_ids:
+            tmpl_id = template_guid_to_id.get(tmpl_id)
+            if tmpl_id is None: nulled += 1
         if loc_id     and loc_id     not in valid_location_ids: loc_id     = None; nulled += 1
         if company_id and company_id not in valid_company_ids:  company_id = None; nulled += 1
 

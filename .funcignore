@@ -1,0 +1,22 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+.python_packages
+local.settings.json
+.env
+*.zip
+*_local.py
+fix_*.py
+add_*.py
+insert_*.py
+Untitled.txt
+# Full sync*.txt
+$key*.txt
+VG-SiteDocs-ETL.backup
+.claude
+*.bak
+deploy.ps1
+

@@ -7,25 +7,27 @@ form_contents. Only fetches forms that are new or modified since last fetch.
 import logging
 import json
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import psycopg2.extras
 from .utils import api_get, paginate, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
-FORM_TYPE_ID = "6c3f93b6-1326-478b-a6d6-59aba925a1c1"  # Time Ticket
+MAX_WORKERS = 10
+FLUSH_EVERY = 50
 
 
 def sync_form_contents(conn):
     log.info("Syncing form_contents...")
 
-    # Get all time ticket form IDs from the API (source of truth for which
-    # forms are time tickets — DB template ID is unreliable due to FK nulling)
-    api_forms = paginate("/forms", extra_params={"formTypeId": FORM_TYPE_ID})
+    # Pull every form across all form types — form_contents caches the raw
+    # JSON for any downstream parser, not just time tickets.
+    api_forms = paginate("/forms")
     api_form_map = {f["Id"]: f for f in api_forms}
-    log.info(f"  API returned {len(api_form_map)} time ticket forms")
+    log.info(f"  API returned {len(api_form_map)} forms")
 
     if not api_form_map:
-        log.warning("  No time ticket forms returned from API — skipping")
+        log.warning("  No forms returned from API — skipping")
         return
 
     # Check which ones we already have cached
@@ -56,37 +58,44 @@ def sync_form_contents(conn):
 
     log.info(f"  form_contents: {len(pending)} forms need content fetch")
 
-    ok = skipped = errors = 0
-    batch = []
-
-    for i, form_id in enumerate(pending):
+    def _fetch(form_id):
         try:
             content = api_get(f"/forms/content/{form_id}")
             if content is None:
-                skipped += 1
-                continue
-
+                return form_id, "skip", None
             if isinstance(content, str):
                 content = json.loads(content)
-
-            batch.append({
+            return form_id, "ok", {
                 "form_id":     form_id,
                 "raw_content": json.dumps(content),
                 "fetched_on":  now_iso(),
-            })
-
-            if len(batch) >= 50:
-                try:
-                    _flush(conn, batch)
-                    ok += len(batch)
-                except Exception:
-                    errors += len(batch)
-                log.info(f"  form_contents: fetched {ok}/{len(pending)}")
-                batch = []
-
+            }
         except Exception as e:
             log.warning(f"  form_contents: failed {form_id}: {e}")
-            errors += 1
+            return form_id, "error", None
+
+    ok = skipped = errors = 0
+    batch = []
+    total = len(pending)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = [ex.submit(_fetch, fid) for fid in pending]
+        for fut in as_completed(futures):
+            _, status, row = fut.result()
+            if status == "ok":
+                batch.append(row)
+                if len(batch) >= FLUSH_EVERY:
+                    try:
+                        _flush(conn, batch)
+                        ok += len(batch)
+                    except Exception:
+                        errors += len(batch)
+                    log.info(f"  form_contents: fetched {ok}/{total}")
+                    batch = []
+            elif status == "skip":
+                skipped += 1
+            else:
+                errors += 1
 
     if batch:
         try:
