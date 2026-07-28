@@ -22,3 +22,15 @@ obj/
 .idea/
 *.swp
 .DS_Store
+
+# Local tooling
+.claude/
+
+# Build artifacts (regenerable)
+*.zip
+*.bak
+
+# Local scratch notes — contain live function keys / draft emails, never commit
+Untitled.txt
+\# Full sync (all stages).txt
+$key = az functionapp config appset.txt
