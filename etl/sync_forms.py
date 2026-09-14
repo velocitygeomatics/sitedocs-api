@@ -112,5 +112,16 @@ def sync_forms(conn, incremental: bool = True):
 
 
 def run(conn):
-    sync_form_types(conn)
+    # Form types are a small, near-static lookup (99 rows, unchanged since June
+    # 2026); forms arrive hourly. Letting a form_types failure abort the stage
+    # meant a broken /formtypes endpoint silently stopped all form ingestion --
+    # and with it time_tickets, which is derived from forms -- for three months.
+    # The GUID -> id map below falls back to whatever is already in the table, so
+    # forms still load correctly against the last known set of types.
+    try:
+        sync_form_types(conn)
+    except Exception as e:
+        conn.rollback()
+        log.error(f"  form_types sync failed ({e}); continuing with forms using "
+                  f"the form types already on file")
     sync_forms(conn)

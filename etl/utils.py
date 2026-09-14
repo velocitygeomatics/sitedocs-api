@@ -53,6 +53,9 @@ def _require_env(name: str) -> str:
 
 API_BASE     = "https://api-1.sitedocs.com/api/v1"
 PAGE_SIZE    = 100
+# Ceiling on pages per endpoint. The largest entity on file is worker_locations at
+# ~20k rows (201 pages); 1000 leaves room to grow while still bounding a runaway.
+MAX_PAGES    = 1000
 RETRY_LIMIT  = 4
 RATE_LIMIT_S = 0.5   # seconds between calls
 
@@ -121,20 +124,40 @@ def paginate(path: str, extra_params: dict = None) -> list:
     page = 0
     params = {**(extra_params or {}), "count": PAGE_SIZE}
 
-    while True:
+    seen = set()
+
+    while page < MAX_PAGES:
         params["page"] = page
         batch = api_get(path, params)
 
         if not batch:
             break
 
-        results.extend(batch)
-        log.debug(f"{path} page {page}: {len(batch)} rows")
+        # A short final page is how this API says "that was the last one". When an
+        # endpoint stops honouring that contract it hands back a full page forever
+        # and the loop never ends -- /formtypes did exactly that from June 2026,
+        # reaching page 4040 of a 99-row entity before the vendor dropped the
+        # connection, and the exception killed the whole forms stage nightly for
+        # three months. Repeated ids are the reliable signal that paging has
+        # stopped advancing, so stop on them regardless of page length.
+        new_rows = [r for r in batch if r.get("Id") not in seen]
+        seen.update(r.get("Id") for r in batch if r.get("Id") is not None)
+
+        if not new_rows:
+            log.warning(f"{path} page {page} repeated rows already seen -- "
+                        f"endpoint is not advancing; stopping at {len(results)} rows")
+            break
+
+        results.extend(new_rows)
+        log.debug(f"{path} page {page}: {len(batch)} rows ({len(new_rows)} new)")
 
         if len(batch) < PAGE_SIZE:
             break
 
         page += 1
+    else:
+        log.warning(f"{path} hit the {MAX_PAGES}-page ceiling; "
+                    f"returning {len(results)} rows and moving on")
 
     return results
 
