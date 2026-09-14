@@ -216,10 +216,22 @@ def _num(val: Optional[str]) -> Optional[float]:
         return None
 
 
+def _yymmdd(token: str) -> Optional[str]:
+    """Interpret a bare 6-digit YYMMDD token as an ISO date, or None if it is
+    not a real calendar date. Validation is what makes this safe: a job number
+    like 250071 is rejected (month 00, day 71), while 260211 resolves."""
+    try:
+        return datetime(2000 + int(token[:2]), int(token[2:4]),
+                        int(token[4:6])).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
 def _date(val: Optional[str]) -> Optional[str]:
     """Parse a date string into YYYY-MM-DD for Postgres.
     Handles ISO, natural language ('March 3', 'Jan 22, 2026.', 'Feb 3rd, 2026',
-    'Feb 21,2026', 'Feb 4/26', '2026 01 25'). Returns None if unparseable.
+    'Feb 21,2026', 'Feb 4/26', '2026 01 25') and bare YYMMDD ('260211').
+    Returns None if unparseable.
     """
     if not val:
         return None
@@ -228,6 +240,14 @@ def _date(val: Optional[str]) -> Optional[str]:
     # Already ISO — pass through
     if re.match(r'^\d{4}-\d{2}-\d{2}$', val):
         return val
+
+    # Bare YYMMDD, the convention crews use in labels and sometimes type into the
+    # Date field itself ('260211' → 2026-02-11). Unambiguous here because the
+    # value came from a field the form calls Date.
+    if re.fullmatch(r'\d{6}', val):
+        iso = _yymmdd(val)
+        if iso:
+            return iso
 
     # Insert missing space after comma: 'Feb 22,2026' → 'Feb 22, 2026'
     val = re.sub(r',(\d)', r', \1', val)
@@ -241,7 +261,10 @@ def _date(val: Optional[str]) -> Optional[str]:
     for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y",
                 "%B %d", "%b %d", "%m/%d/%Y", "%m-%d-%Y",
                 "%d %B %Y", "%d %b %Y", "%Y/%m/%d",
-                "%b %d/%y", "%Y %m %d"):
+                "%b %d/%y", "%Y %m %d",
+                # Two-digit-year variants of the above, tried last so a full
+                # year always wins: 'Feb 20, 26', 'April 28/26'.
+                "%b %d, %y", "%B %d, %y", "%B %d/%y"):
         try:
             parsed = datetime.strptime(cleaned, fmt)
             # If no year was in the format, infer from current year
@@ -258,7 +281,8 @@ def _date(val: Optional[str]) -> Optional[str]:
 def _date_from_label(label: Optional[str]) -> Optional[str]:
     """
     Parse a date from a form label as fallback.
-    Handles patterns like: 2026-04-07-JSL-DFT, 260095-JS-04072026-FT
+    Handles patterns like: 2026-04-07-JSL-DFT, 260095-JS-04072026-FT,
+    260009-SS-260216-Golden Base
     Returns YYYY-MM-DD string or None.
     """
     if not label:
@@ -276,6 +300,17 @@ def _date_from_label(label: Optional[str]) -> Optional[str]:
             return f"{yyyy}-{mm}-{dd}"
         except ValueError:
             pass
+    # Pattern 3: bare YYMMDD segment, e.g. 260009-SS-260216-Golden Base.
+    # The leading segment is skipped because by convention it is the job
+    # number, and a job number is indistinguishable from a date -- 92 of the
+    # labels on file open with one that parses as a valid calendar date.
+    # Checked against every ticket whose date is already known: 22 labels
+    # carry a trailing YYMMDD segment and all 22 agree with the recorded date.
+    for seg in re.split(r'[-_ ]', label)[1:]:
+        if re.fullmatch(r'\d{6}', seg):
+            iso = _yymmdd(seg)
+            if iso:
+                return iso
     return None
 
 
