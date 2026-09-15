@@ -17,6 +17,32 @@ MAX_WORKERS = 10
 FLUSH_EVERY = 50
 
 
+def needs_fetch(last_modified, fetched_on) -> bool:
+    """True when a form's content is not cached or is older than its LastModifiedOn.
+
+    SiteDocs returns timestamps without a zone ("2026-08-28T13:11:00.703");
+    they are UTC. fetched_on comes back from a TIMESTAMPTZ column, so it is
+    aware. Comparing naive to aware raises TypeError, and until 2026-09-14
+    that exception was caught and treated as "re-fetch", so every cached
+    form was fetched again every night: 3207 forms, 27 minutes, against a
+    10-minute function timeout. New forms sat behind the backlog and never
+    reached the cache.
+    """
+    if fetched_on is None:
+        return True
+    if not last_modified:
+        return False
+    try:
+        mod = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if mod.tzinfo is None:
+        mod = mod.replace(tzinfo=timezone.utc)
+    if fetched_on.tzinfo is None:
+        fetched_on = fetched_on.replace(tzinfo=timezone.utc)
+    return mod > fetched_on
+
+
 def sync_form_contents(conn):
     log.info("Syncing form_contents...")
 
@@ -39,24 +65,15 @@ def sync_form_contents(conn):
         """, (list(api_form_map.keys()),))
         cached = {str(r["form_id"]): r["fetched_on"] for r in cur.fetchall()}
 
-    # Need fetch if: not cached, OR form modified after last fetch
-    pending = []
-    for fid, form in api_form_map.items():
-        last_modified = form.get("LastModifiedOn")
-        if fid not in cached:
-            pending.append(fid)
-        elif last_modified and cached[fid]:
-            try:
-                mod = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
-                fetched = cached[fid]
-                if fetched.tzinfo is None:
-                    fetched = fetched.replace(tzinfo=timezone.utc)
-                if mod > fetched:
-                    pending.append(fid)
-            except Exception:
-                pending.append(fid)
+    # Need fetch if: not cached, OR form modified after last fetch.
+    # Newest forms first: the nightly run has a 10-minute budget, and a
+    # form submitted today must land even if the run is cut off.
+    pending = [fid for fid, form in api_form_map.items()
+               if needs_fetch(form.get("LastModifiedOn"), cached.get(fid))]
+    pending.sort(key=lambda fid: api_form_map[fid].get("CreatedOn") or "", reverse=True)
 
-    log.info(f"  form_contents: {len(pending)} forms need content fetch")
+    log.info(f"  form_contents: {len(pending)} forms need content fetch "
+             f"({len(api_form_map) - len(cached)} new)")
 
     def _fetch(form_id):
         try:
