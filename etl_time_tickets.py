@@ -12,7 +12,7 @@ import re
 import logging
 import time
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import requests
@@ -250,10 +250,56 @@ def _yymmdd(token: str) -> Optional[str]:
         return None
 
 
-def _date(val: Optional[str]) -> Optional[str]:
+_NUMERIC_DATE = re.compile(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$')
+
+
+def _ymd(y: int, m: int, d: int) -> Optional[date]:
+    """Build a date, or None if those numbers are not a real calendar date."""
+    try:
+        return date(y, m, d)
+    except ValueError:
+        return None
+
+
+def _submitted_date(form: dict) -> Optional[date]:
+    """The day the form reached SiteDocs, used only to break date ambiguity."""
+    raw = form.get("CreatedOn")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _numeric_date(val: str, submitted: Optional[date]) -> Optional[str]:
+    """Resolve a bare numeric date like '12-01-2026' or '01/24/2026'.
+
+    Crews write both orders. Four tickets carry values such as '01/24/2026'
+    that can only be month-first, so the parser cannot simply be flipped. Where
+    both readings are real dates the submission date decides: a ticket is filled
+    out the day it is worked, not eleven months later. Form 'Test' reads
+    '12-01-2026' and was submitted 2026-01-12 -- day-first is 0 days away,
+    month-first is 323 -- and it was the only ticket in the table dated in the
+    future. With no submission date on hand, month-first wins as before.
+    """
+    m = _NUMERIC_DATE.match(val)
+    if not m:
+        return None
+    a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    month_first, day_first = _ymd(y, a, b), _ymd(y, b, a)
+    if month_first and day_first and month_first != day_first and submitted:
+        chosen = min((month_first, day_first), key=lambda d: abs((d - submitted).days))
+    else:
+        chosen = month_first or day_first
+    return chosen.strftime("%Y-%m-%d") if chosen else None
+
+
+def _date(val: Optional[str], submitted: Optional[date] = None) -> Optional[str]:
     """Parse a date string into YYYY-MM-DD for Postgres.
     Handles ISO, natural language ('March 3', 'Jan 22, 2026.', 'Feb 3rd, 2026',
-    'Feb 21,2026', 'Feb 4/26', '2026 01 25') and bare YYMMDD ('260211').
+    'Feb 21,2026', 'Feb 4/26', '2026 01 25'), bare YYMMDD ('260211') and
+    numeric d/m/y or m/d/y, which `submitted` disambiguates.
     Returns None if unparseable.
     """
     if not val:
@@ -271,6 +317,11 @@ def _date(val: Optional[str]) -> Optional[str]:
         iso = _yymmdd(val)
         if iso:
             return iso
+
+    # Numeric day/month/year in either order — the submission date decides.
+    numeric = _numeric_date(val, submitted)
+    if numeric:
+        return numeric
 
     # Insert missing space after comma: 'Feb 22,2026' → 'Feb 22, 2026'
     val = re.sub(r',(\d)', r', \1', val)
@@ -368,7 +419,8 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
     label = form.get("Label") or ""
 
     # Date: try form field first, fall back to parsing the label
-    ticket_date = _date(f(content, "Date")) or _date_from_label(label)
+    submitted = _submitted_date(form)
+    ticket_date = _date(f(content, "Date"), submitted) or _date_from_label(label)
 
     # Worker fields are JSON arrays — extract name
     crew_chief = _extract_worker_name(f(content, "Crew Chief"))
@@ -426,7 +478,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
         # Notes / Approval
         "details":              f(content, "Details"),
         "approval":             f(content, "Approval"),
-        "approval_date":        _date(f(content, "Approval Date")),
+        "approval_date":        _date(f(content, "Approval Date"), submitted),
 
         # Signature — populated by UPDATE from form_signatures after sync
         "signed_by":            None,
@@ -465,7 +517,8 @@ def parse_env_time_ticket(form: dict, content: dict) -> dict:
     f = _extract_field
     label = form.get("Label") or ""
 
-    ticket_date = _date(f(content, "Date")) or _date_from_label(label)
+    submitted = _submitted_date(form)
+    ticket_date = _date(f(content, "Date"), submitted) or _date_from_label(label)
 
     return {
         "form_id":              form["Id"],
@@ -514,7 +567,7 @@ def parse_env_time_ticket(form: dict, content: dict) -> dict:
         # Notes / Approval
         "details":              f(content, "Details"),
         "approval":             f(content, "Approval"),
-        "approval_date":        _date(f(content, "Approval Date")),
+        "approval_date":        _date(f(content, "Approval Date"), submitted),
 
         # Signature — populated by UPDATE from form_signatures after sync
         "signed_by":            None,

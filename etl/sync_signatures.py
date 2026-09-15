@@ -4,7 +4,7 @@ Syncs form_signatures from the /signatures endpoint.
 """
 
 import logging
-from .utils import paginate, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -18,8 +18,8 @@ def sync_signatures(conn):
         "form_id":                   r.get("DocumentVersionId"),
         "employee_id":               r.get("EmployeeId"),
         "image_id":                  r.get("ImageId"),
-        "created_on":                r.get("CreatedOn"),
-        "last_modified_on":          r.get("LastModifiedOn"),
+        "created_on":                as_utc(r.get("CreatedOn")),
+        "last_modified_on":          as_utc(r.get("LastModifiedOn")),
         "is_deleted":                r.get("IsDeleted", False),
         "latitude":                  r.get("Latitude"),
         "longitude":                 r.get("Longitude"),

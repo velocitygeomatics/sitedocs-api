@@ -8,7 +8,7 @@ over known entity IDs already in the database.
 """
 
 import logging
-from .utils import api_get, upsert, set_last_sync, now_iso
+from .utils import as_utc, api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ def _map_attachment(r: dict) -> dict | None:
         "name":               r.get("name"),
         "company_id":         r.get("companyId"),
         "general_type_id":    r.get("generalTypeId"),
-        "effective_on":       r.get("effectiveOn") if r.get("effectiveOn") not in (None, {}) else None,
-        "expires_on":         r.get("expiresOn") if r.get("expiresOn") not in (None, {}) else None,
+        "effective_on":       as_utc(r.get("effectiveOn")) if r.get("effectiveOn") not in (None, {}) else None,
+        "expires_on":         as_utc(r.get("expiresOn")) if r.get("expiresOn") not in (None, {}) else None,
         "created_by":         r.get("createdBy"),
         "updated_by":         r.get("updatedBy"),
         "created_at":         r.get("createdAt"),

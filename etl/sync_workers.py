@@ -7,7 +7,7 @@ Syncs:
 
 import logging
 import psycopg2.extras
-from .utils import paginate, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +37,8 @@ def sync_workers(conn):
         "emergency_contact1": r.get("EmergencyContact1"),
         "emergency_contact2": r.get("EmergencyContact2"),
         "emergency_notes":   r.get("EmergencyNotes"),
-        "created_on":        r.get("CreatedOn"),
-        "last_modified_on":  r.get("LastModifiedOn"),
+        "created_on":        as_utc(r.get("CreatedOn")),
+        "last_modified_on":  as_utc(r.get("LastModifiedOn")),
         "etl_synced_on":     now_iso(),
     } for r in rows]
 

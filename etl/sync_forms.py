@@ -7,7 +7,7 @@ Syncs:
 """
 
 import logging
-from .utils import paginate, upsert, get_last_sync, set_last_sync, now_iso
+from .utils import as_utc, paginate, upsert, get_last_sync, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -29,8 +29,8 @@ def sync_form_types(conn):
         "is_deleted":            r.get("IsDeleted", False),
         "created_by":            r.get("CreatedBy"),
         "last_modified_by":      r.get("LastModifiedBy"),
-        "created_on":            r.get("CreatedOn"),
-        "last_modified_on":      r.get("LastModifiedOn"),
+        "created_on":            as_utc(r.get("CreatedOn")),
+        "last_modified_on":      as_utc(r.get("LastModifiedOn")),
         "etl_synced_on":         now_iso(),
     } for r in rows]
 
@@ -98,8 +98,8 @@ def sync_forms(conn, incremental: bool = True):
             "due":                          r.get("Due"),
             "created_by":                   r.get("CreatedBy"),
             "last_modified_by":             r.get("LastModifiedBy"),
-            "created_on":                   r.get("CreatedOn"),
-            "last_modified_on":             r.get("LastModifiedOn"),
+            "created_on":                   as_utc(r.get("CreatedOn")),
+            "last_modified_on":             as_utc(r.get("LastModifiedOn")),
             "etl_synced_on":                now_iso(),
         })
 

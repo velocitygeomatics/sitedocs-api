@@ -8,7 +8,7 @@ Syncs:
 """
 
 import logging
-from .utils import paginate, api_get, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ def sync_locations(conn):
         "end_date":            r.get("EndDate"),
         "creating_company_id": r.get("CreatingCompanyId"),
         "is_archived":         r.get("IsArchived", False),
-        "created_on":          r.get("CreatedOn"),
-        "last_modified_on":    r.get("LastModifiedOn"),
+        "created_on":          as_utc(r.get("CreatedOn")),
+        "last_modified_on":    as_utc(r.get("LastModifiedOn")),
         "etl_synced_on":       now_iso(),
     } for r in rows]
 
@@ -48,7 +48,7 @@ def sync_companies(conn):
         "is_active":       r.get("IsActive", True),
         "projects_count":  r.get("ProjectsCount", 0),
         "codes_count":     r.get("CodesCount", 0),
-        "created_on":      r.get("CreatedOn"),
+        "created_on":      as_utc(r.get("CreatedOn")),
         "etl_synced_on":   now_iso(),
     } for r in rows]
 

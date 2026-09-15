@@ -8,7 +8,7 @@ Syncs all lookup/type tables:
 """
 
 import logging
-from .utils import paginate, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ def sync_company_types(conn):
         "name":            r.get("Name"),
         "is_deleted":      r.get("IsDeleted", False),
         "created_by":      r.get("CreatedBy"),
-        "created_on":      r.get("CreatedOn"),
-        "modified_on":     r.get("ModifiedOn"),
+        "created_on":      as_utc(r.get("CreatedOn")),
+        "modified_on":     as_utc(r.get("ModifiedOn")),
         "etl_synced_on":   now_iso(),
     } for r in rows]
 
@@ -58,8 +58,8 @@ def sync_equipment_types(conn):
         "account_id":        r.get("AccountId"),
         "is_deleted":        r.get("IsDeleted", False),
         "created_by":        r.get("CreatedBy"),
-        "created_on":        r.get("CreatedOn"),
-        "modified_on":       r.get("ModifiedOn"),
+        "created_on":        as_utc(r.get("CreatedOn")),
+        "modified_on":       as_utc(r.get("ModifiedOn")),
         "etl_synced_on":     now_iso(),
     } for r in rows]
 
@@ -81,8 +81,8 @@ def sync_attachment_types(conn):
         "account_id":         r.get("AccountId"),
         "is_deleted":         r.get("IsDeleted", False),
         "created_by":         r.get("CreatedBy"),
-        "created_on":         r.get("CreatedOn"),
-        "modified_on":        r.get("ModifiedOn"),
+        "created_on":         as_utc(r.get("CreatedOn")),
+        "modified_on":        as_utc(r.get("ModifiedOn")),
         "etl_synced_on":      now_iso(),
     } for r in rows]
 
@@ -103,8 +103,8 @@ def sync_certification_types(conn):
         "name":             r.get("Name"),
         "company_id":       r.get("CompanyId"),
         "is_deleted":       r.get("IsDeleted", False),
-        "created_on":       r.get("CreatedOn"),
-        "last_modified_on": r.get("LastModifiedOn"),
+        "created_on":       as_utc(r.get("CreatedOn")),
+        "last_modified_on": as_utc(r.get("LastModifiedOn")),
         "etl_synced_on":    now_iso(),
     } for r in rows]
 

@@ -9,7 +9,7 @@ Syncs:
 
 import logging
 import psycopg2.extras
-from .utils import paginate, api_get, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ def sync_equipments(conn):
         "account_id":          r.get("AccountId"),
         "is_deleted":          r.get("IsDeleted", False),
         "created_by":          r.get("CreatedBy"),
-        "created_on":          r.get("CreatedOn"),
-        "modified_on":         r.get("ModifiedOn"),
+        "created_on":          as_utc(r.get("CreatedOn")),
+        "modified_on":         as_utc(r.get("ModifiedOn")),
         "etl_synced_on":       now_iso(),
     } for r in rows]
 

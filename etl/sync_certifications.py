@@ -6,7 +6,7 @@ Syncs:
 """
 
 import logging
-from .utils import paginate, upsert, get_last_sync, set_last_sync, now_iso
+from .utils import as_utc, paginate, upsert, get_last_sync, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +39,8 @@ def sync_certifications(conn, incremental: bool = True):
             "expires":                   r.get("Expires"),
             "acknowledged_expiry_date":  r.get("AcknowledgedExpiryDate"),
             "is_archived":               r.get("IsArchived", False),
-            "created_on":                r.get("CreatedOn"),
-            "last_modified_on":          r.get("LastModifiedOn"),
+            "created_on":                as_utc(r.get("CreatedOn")),
+            "last_modified_on":          as_utc(r.get("LastModifiedOn")),
             "etl_synced_on":             now_iso(),
         })
 
@@ -51,7 +51,7 @@ def sync_certifications(conn, incremental: bool = True):
                 "certification_id": r["Id"],
                 "file_name":        att.get("FileName") or att.get("filename"),
                 "content_type":     att.get("ContentType") or att.get("contentType"),
-                "created_on":       att.get("CreatedOn") or att.get("createdAt"),
+                "created_on":       as_utc(att.get("CreatedOn") or att.get("createdAt")),
                 "etl_synced_on":    now_iso(),
             })
 

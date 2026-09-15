@@ -7,7 +7,7 @@ Syncs:
 """
 
 import logging
-from .utils import paginate, api_get, upsert, set_last_sync, now_iso
+from .utils import as_utc, paginate, api_get, upsert, set_last_sync, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def sync_incident_folder_types(conn):
         "is_user_generated":   r.get("IsUserGenerated", False),
         "is_hidden":           r.get("IsHidden", False),
         "has_private_reports": r.get("HasPrivateReports", False),
-        "created_on":          r.get("CreatedOn"),
+        "created_on":          as_utc(r.get("CreatedOn")),
         "etl_synced_on":       now_iso(),
     } for r in rows]
 
@@ -50,8 +50,8 @@ def sync_incident_folders(conn):
         "latest_status": r.get("LatestStatus"),
         "is_active":    r.get("IsActive", True),
         "created_by":   r.get("CreatedBy"),
-        "created_on":   r.get("CreatedOn"),
-        "modified_on":  r.get("ModifiedOn"),
+        "created_on":   as_utc(r.get("CreatedOn")),
+        "modified_on":  as_utc(r.get("ModifiedOn")),
         "etl_synced_on": now_iso(),
     } for r in rows if isinstance(r, dict) and r.get("Id")]
 
@@ -83,7 +83,7 @@ def sync_incident_folder_statuses(conn, folders: list):
                     "company_id":            s.get("CompanyId"),
                     "status":                s.get("status"),
                     "comment":               s.get("Comment"),
-                    "occurred_on_utc":       s.get("OccurredOnUtc"),
+                    "occurred_on_utc":       as_utc(s.get("OccurredOnUtc")),
                     "is_final_checkpoint":   s.get("IsFinalCheckpoint", False),
                     "triggered_by_user_id":  s.get("TriggeredByUserId"),
                     "requires_intervention": s.get("RequiresIntervention", False),

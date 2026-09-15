@@ -293,3 +293,29 @@ def upsert(conn, table: str, rows: list[dict], conflict_col: str = "id"):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def as_utc(ts):
+    """Stamp a vendor timestamp as UTC before it reaches a timestamptz column.
+
+    SiteDocs sends timestamps with no zone at all ("2026-08-28T13:11:00.703");
+    they are UTC. Postgres reads a naive string into a timestamptz using the
+    session time zone, which here is America/Edmonton, so every vendor
+    timestamp was stored 6-7 hours ahead of the real instant and read back
+    that far in the future.
+
+    Values that already carry a zone are returned untouched, and so are
+    date-only values: "2026-01-01" has no time to reinterpret, and forcing it
+    to UTC midnight would render as the previous day in Mountain time.
+    """
+    if not ts or not isinstance(ts, str):
+        return ts
+    if "T" not in ts and " " not in ts.strip():
+        return ts                      # date-only, nothing to place in a zone
+    try:
+        parsed = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ts                      # not a timestamp we recognise
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
