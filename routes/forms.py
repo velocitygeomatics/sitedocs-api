@@ -3,9 +3,12 @@ routes/forms.py
 Blueprints for: forms, attachments, time_tickets
 """
 
+
+import uuid
+
 import azure.functions as func
 from shared.db import (
-    query, require_api_key, ok, error, not_found,
+    query, execute, require_api_key, ok, error, not_found,
     parse_pagination, paginated_response,
 )
 
@@ -276,6 +279,7 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
             tt.details, tt.approval, tt.approval_date,
             tt.signed_by, tt.signed_on,
             tt.signature_lat, tt.signature_lng,
+            tt.exported_on, tt.exported_by,
             tt.etl_synced_on
         FROM time_tickets tt
         LEFT JOIN locations l ON l.id = tt.location_id
@@ -305,3 +309,59 @@ def get_time_ticket(req: func.HttpRequest) -> func.HttpResponse:
     if not rows:
         return not_found("Time Ticket")
     return ok(rows[0])
+
+
+@bp.route(route="time-tickets/export", methods=["POST"])
+@require_api_key
+def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST /api/time-tickets/export
+    Body: {"formIds": ["<uuid>", ...], "exportedBy": "name"}
+
+    Stamps exported_on/exported_by — the positive marker that a ticket has
+    been pulled into a QuickBooks payroll run. Tickets already carrying a
+    stamp keep their original one, so re-running an export never rewrites
+    who exported it or when.
+    """
+    try:
+        body = req.get_json()
+    except ValueError:
+        return error(400, "Body must be JSON")
+
+    form_ids = body.get("formIds")
+    if not isinstance(form_ids, list) or not form_ids:
+        return error(400, "formIds must be a non-empty array")
+
+    try:
+        form_ids = [str(uuid.UUID(str(f))) for f in form_ids]
+    except (ValueError, AttributeError):
+        return error(400, "formIds must all be UUIDs")
+
+    exported_by = str(body.get("exportedBy") or "").strip() or "unknown"
+
+    # found vs marked separates "was already exported" from "no such ticket" —
+    # the caller needs to tell those apart, they mean very different things.
+    rows = execute("""
+        WITH upd AS (
+            UPDATE time_tickets
+               SET exported_on = NOW(),
+                   exported_by = %s
+             WHERE form_id = ANY(%s::uuid[])
+               AND exported_on IS NULL
+            RETURNING form_id
+        )
+        SELECT (SELECT count(*) FROM upd) AS marked,
+               (SELECT count(*) FROM time_tickets
+                 WHERE form_id = ANY(%s::uuid[])) AS found
+    """, (exported_by, form_ids, form_ids))
+
+    total = len(set(form_ids))
+    marked = rows[0]["marked"]
+    found = rows[0]["found"]
+    return ok({
+        "marked": marked,
+        "already": found - marked,
+        "missing": total - found,
+        "total": total,
+        "exportedBy": exported_by,
+    })

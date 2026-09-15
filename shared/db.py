@@ -95,6 +95,22 @@ def query(sql: str, params: tuple = None) -> list[dict]:
         release_connection(conn)
 
 
+def execute(sql: str, params: tuple = None) -> list[dict]:
+    """Execute a write and commit. Returns RETURNING rows, or [] if none."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = [dict(r) for r in cur.fetchall()] if cur.description else []
+        conn.commit()
+        return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_connection(conn)
+
+
 # ---------------------------------------------------------------------------
 # Auth middleware
 # ---------------------------------------------------------------------------
