@@ -203,7 +203,7 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     """
     GET /api/time-tickets
     Query params: jobNo, client, crewChief, locationId,
-                  dateFrom, dateTo, isDeleted, page, count
+                  dateFrom, dateTo, isDeleted, ticketType, page, count
     """
     count, offset = parse_pagination(req)
     page = offset // count if count else 0
@@ -230,6 +230,12 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
         conditions.append("tt.crew_chief ILIKE %s")
         params.append(f"%{crew_chief}%")
 
+    # 'survey' | 'environmental'. Omit to get both templates.
+    ticket_type = req.params.get("ticketType")
+    if ticket_type:
+        conditions.append("tt.ticket_type = %s")
+        params.append(ticket_type)
+
     location_id = req.params.get("locationId")
     if location_id:
         conditions.append("tt.location_id = %s")
@@ -252,7 +258,8 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
 
     sql = f"""
         SELECT
-            tt.form_id, tt.form_label, tt.submitted_on, tt.ticket_date,
+            tt.form_id, tt.form_label, tt.ticket_type,
+            tt.submitted_on, tt.ticket_date,
             tt.location_id,
             l.name AS location_name,
             tt.job_no, tt.client, tt.client_field_rep,
@@ -264,7 +271,8 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
             tt.atv_utv_snowmobile, tt.marker_posts, tt.iron_posts,
             tt.cc_travel_hrs, tt.cc_work_hrs, tt.cc_notes_hrs,
             tt.cc_total_hrs, tt.cc_subsistence,
-            tt.sa_travel_hrs, tt.sa_work_hrs, tt.sa_total_hrs, tt.sa_subsistence,
+            tt.sa_travel_hrs, tt.sa_work_hrs, tt.sa_notes_hrs,
+            tt.sa_total_hrs, tt.sa_subsistence,
             tt.details, tt.approval, tt.approval_date,
             tt.signed_by, tt.signed_on,
             tt.signature_lat, tt.signature_lng,

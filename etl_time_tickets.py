@@ -37,6 +37,19 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 FORM_TYPE_ID    = "6c3f93b6-1326-478b-a6d6-59aba925a1c1"
+
+# The Environmental Scientist Time Ticket is a second template with the same
+# purpose and a different layout: two scientists instead of a crew chief and an
+# assistant, and their hours sit in two groups whose field labels are identical
+# ("Travel:", "Work:", ...) and are told apart only by the group Title.
+# Unparsed until 2026-09-14, so 193 tickets never reached VG-Time.
+ENV_FORM_TYPE_ID = "3d2119f9-4b12-4fd0-9e92-67a4b0b9f840"
+
+# template id -> time_tickets.ticket_type
+FORM_TYPE_IDS = {
+    FORM_TYPE_ID:     "survey",
+    ENV_FORM_TYPE_ID: "environmental",
+}
 API_BASE        = "https://api-1.sitedocs.com/api/v1"
 PAGE_SIZE       = 100
 RATE_LIMIT_WAIT = 1.0   # seconds between API calls
@@ -132,14 +145,22 @@ def fetch_form_content(form_id: str) -> dict:
 # Content parser — FIXED
 # ---------------------------------------------------------------------------
 
-def _extract_field(content: dict, label: str) -> Optional[str]:
+def _extract_field(content: dict, label: str, group_title: Optional[str] = None) -> Optional[str]:
     """
     Walk the Groups → Items tree and find a field by its Content label.
     Strips trailing colon and whitespace from the Content key before comparing.
     Returns the raw value string, or None if not found / empty.
+
+    `group_title` restricts the search to groups with that Title. The
+    Environmental Scientist template needs it: both scientists' hours use the
+    labels "Travel:", "Work:", "Notes:" and "Total:", so without the group the
+    first scientist's numbers would be read twice.
     """
     label_clean = label.strip().rstrip(":").lower()
+    want_group  = group_title.strip().lower() if group_title else None
     for group in content.get("Groups", []):
+        if want_group and (group.get("Title") or "").strip().lower() != want_group:
+            continue
         for item in group.get("Items", []):
             raw_content = item.get("Content") or ""
             # Content may be a JSON string for complex fields e.g. {"Label":"ATV/UTV/Snowmobile:","ListId":"..."}
@@ -183,7 +204,9 @@ def _extract_worker_name(val: Optional[str]) -> Optional[str]:
                 return name if name else None
         except Exception:
             pass
-    return val if val else None
+    # A worker slot left empty comes back as the literal string "None", not as
+    # an empty value. Solo environmental tickets hit this on Scientist 2.
+    return val if val and val.lower() != "none" else None
 
 
 def _extract_list_selection(val: Optional[str]) -> Optional[str]:
@@ -359,6 +382,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
     return {
         "form_id":              form["Id"],
         "form_label":           label,
+        "ticket_type":          "survey",
         "location_id":          form.get("LocationId"),
         "location_name":        None,               # enriched by JOIN at query time
         "submitted_on":         form.get("CreatedOn"),
@@ -395,6 +419,7 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
         # Assistant Labour
         "sa_travel_hrs":        _num(f(content, "SA Travel")),
         "sa_work_hrs":          _num(f(content, "SA Work")),
+        "sa_notes_hrs":         None,   # no Notes field on the survey template
         "sa_total_hrs":         _num(f(content, "SA Total")),
         "sa_subsistence":       sa_subs,
 
@@ -414,24 +439,119 @@ def parse_time_ticket(form: dict, content: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Environmental Scientist Time Ticket
+# ---------------------------------------------------------------------------
+
+# Group titles that hold each scientist's hours. Their field labels are
+# identical, so the title is the only thing separating them.
+ENV_GROUP_1 = "Environmental Scientist 1"
+ENV_GROUP_2 = "Environmental Scientist 2"
+
+
+def parse_env_time_ticket(form: dict, content: dict) -> dict:
+    """
+    Flatten an Environmental Scientist Time Ticket into the same time_tickets row.
+
+    The two templates bill the same way but name their people differently.
+    Scientist 1 lands in the crew_chief/cc_* columns and scientist 2 in the
+    assistant/sa_* columns, so every existing query, export and signature
+    update keeps working unchanged; ticket_type tells VG-Time to price the
+    rows as Field Technician and Field Assistant instead of Crew Chief and
+    Survey Assistant.
+
+    Fields the survey template has and this one does not (pipe locator,
+    chainsaw, jackhammer, marker and iron posts, client field rep) stay NULL.
+    """
+    f = _extract_field
+    label = form.get("Label") or ""
+
+    ticket_date = _date(f(content, "Date")) or _date_from_label(label)
+
+    return {
+        "form_id":              form["Id"],
+        "form_label":           label,
+        "ticket_type":          "environmental",
+        "location_id":          form.get("LocationId"),
+        "location_name":        None,               # enriched by JOIN at query time
+        "submitted_on":         form.get("CreatedOn"),
+        "is_deleted":           form.get("IsDeleted", False),
+
+        # General Information
+        "ticket_date":          ticket_date,
+        "client":               f(content, "Client"),
+        "client_field_rep":     None,               # not on this template
+        "job_no":               f(content, "Job No"),
+        "wellsite_location":    f(content, "Location"),
+        "project_manager":      f(content, "Project Manager"),
+        "crew_chief":           _extract_worker_name(f(content, ENV_GROUP_1)),
+        "assistant":            _extract_worker_name(f(content, ENV_GROUP_2)),
+
+        # Equipment
+        "survey_equipment_day": _num(f(content, "Field Equipment (Day)")),
+        "pipe_locator_hrs":     None,
+        "chainsaw_hrs":         None,
+        "jackhammer_hrs":       None,
+        "truck_km":             _num(f(content, "Truck km")),
+        "truck_hours":          _num(f(content, "Truck hours")),
+        "atv_utv_snowmobile":   _extract_list_selection(f(content, "ATV/UTV/Snowmobile")),
+        "marker_posts":         None,
+        "iron_posts":           None,
+
+        # Scientist 1 -> Crew Chief columns
+        "cc_travel_hrs":        _num(f(content, "Travel", ENV_GROUP_1)),
+        "cc_work_hrs":          _num(f(content, "Work",   ENV_GROUP_1)),
+        "cc_notes_hrs":         _num(f(content, "Notes",  ENV_GROUP_1)),
+        "cc_total_hrs":         _num(f(content, "Total",  ENV_GROUP_1)),
+        "cc_subsistence":       _extract_list_selection(f(content, "Subsistence", ENV_GROUP_1)),
+
+        # Scientist 2 -> Assistant columns
+        "sa_travel_hrs":        _num(f(content, "Travel", ENV_GROUP_2)),
+        "sa_work_hrs":          _num(f(content, "Work",   ENV_GROUP_2)),
+        "sa_notes_hrs":         _num(f(content, "Notes",  ENV_GROUP_2)),
+        "sa_total_hrs":         _num(f(content, "Total",  ENV_GROUP_2)),
+        "sa_subsistence":       _extract_list_selection(f(content, "Subsistence", ENV_GROUP_2)),
+
+        # Notes / Approval
+        "details":              f(content, "Details"),
+        "approval":             f(content, "Approval"),
+        "approval_date":        _date(f(content, "Approval Date")),
+
+        # Signature — populated by UPDATE from form_signatures after sync
+        "signed_by":            None,
+        "signed_on":            None,
+        "signature_lat":        None,
+        "signature_lng":        None,
+
+        "etl_synced_on":        datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def parse_ticket(form: dict, content: dict, ticket_type: str) -> dict:
+    """Dispatch to the parser for this form's template."""
+    if ticket_type == "environmental":
+        return parse_env_time_ticket(form, content)
+    return parse_time_ticket(form, content)
+
+
+# ---------------------------------------------------------------------------
 # Database upsert
 # ---------------------------------------------------------------------------
 
 UPSERT_SQL = """
 INSERT INTO time_tickets (
-    form_id, form_label, location_id, location_name, submitted_on, is_deleted,
+    form_id, form_label, ticket_type, location_id, location_name, submitted_on, is_deleted,
     ticket_date, client, client_field_rep, job_no, wellsite_location,
     project_manager, crew_chief, assistant,
     survey_equipment_day, pipe_locator_hrs, chainsaw_hrs, jackhammer_hrs,
     truck_km, truck_hours, atv_utv_snowmobile, marker_posts, iron_posts,
     cc_travel_hrs, cc_work_hrs, cc_notes_hrs, cc_total_hrs, cc_subsistence,
-    sa_travel_hrs, sa_work_hrs, sa_total_hrs, sa_subsistence,
+    sa_travel_hrs, sa_work_hrs, sa_notes_hrs, sa_total_hrs, sa_subsistence,
     details, approval, approval_date,
     signed_by, signed_on, signature_lat, signature_lng,
     etl_synced_on
 )
 VALUES (
-    %(form_id)s, %(form_label)s, %(location_id)s, %(location_name)s,
+    %(form_id)s, %(form_label)s, %(ticket_type)s, %(location_id)s, %(location_name)s,
     %(submitted_on)s, %(is_deleted)s,
     %(ticket_date)s, %(client)s, %(client_field_rep)s, %(job_no)s,
     %(wellsite_location)s, %(project_manager)s, %(crew_chief)s, %(assistant)s,
@@ -440,13 +560,15 @@ VALUES (
     %(marker_posts)s, %(iron_posts)s,
     %(cc_travel_hrs)s, %(cc_work_hrs)s, %(cc_notes_hrs)s, %(cc_total_hrs)s,
     %(cc_subsistence)s,
-    %(sa_travel_hrs)s, %(sa_work_hrs)s, %(sa_total_hrs)s, %(sa_subsistence)s,
+    %(sa_travel_hrs)s, %(sa_work_hrs)s, %(sa_notes_hrs)s, %(sa_total_hrs)s,
+    %(sa_subsistence)s,
     %(details)s, %(approval)s, %(approval_date)s,
     %(signed_by)s, %(signed_on)s, %(signature_lat)s, %(signature_lng)s,
     %(etl_synced_on)s
 )
 ON CONFLICT (form_id) DO UPDATE SET
     form_label           = EXCLUDED.form_label,
+    ticket_type          = EXCLUDED.ticket_type,
     location_id          = EXCLUDED.location_id,
     submitted_on         = EXCLUDED.submitted_on,
     is_deleted           = EXCLUDED.is_deleted,
@@ -474,6 +596,7 @@ ON CONFLICT (form_id) DO UPDATE SET
     cc_subsistence       = EXCLUDED.cc_subsistence,
     sa_travel_hrs        = EXCLUDED.sa_travel_hrs,
     sa_work_hrs          = EXCLUDED.sa_work_hrs,
+    sa_notes_hrs         = EXCLUDED.sa_notes_hrs,
     sa_total_hrs         = EXCLUDED.sa_total_hrs,
     sa_subsistence       = EXCLUDED.sa_subsistence,
     details              = EXCLUDED.details,
@@ -538,17 +661,19 @@ def sync_time_tickets(since: Optional[str] = None):
             SELECT
                 f.id AS "Id", f.label AS "Label", f.location_id AS "LocationId",
                 f.created_on AS "CreatedOn", f.is_deleted AS "IsDeleted",
+                ft.document_template_id AS template_id,
                 fc.raw_content
             FROM form_contents fc
             JOIN forms f ON f.id = fc.form_id
             JOIN form_types ft ON ft.id = f.document_template_id
             WHERE f.is_deleted = false
-              AND ft.document_template_id = %s::uuid
+              AND ft.document_template_id = ANY(%s::uuid[])
             ORDER BY f.created_on
-        """, (FORM_TYPE_ID,))
+        """, (list(FORM_TYPE_IDS),))
         rows = cur.fetchall()
 
-    log.info(f"Found {len(rows)} time ticket forms in form_contents cache")
+    log.info(f"Found {len(rows)} time ticket forms in form_contents cache "
+             f"(templates: {len(FORM_TYPE_IDS)})")
 
     batch = []
     errors = 0
@@ -567,7 +692,8 @@ def sync_time_tickets(since: Optional[str] = None):
             content = db_row["raw_content"]
             if isinstance(content, str):
                 content = json.loads(content)
-            row = parse_time_ticket(form, content)
+            ticket_type = FORM_TYPE_IDS[str(db_row["template_id"])]
+            row = parse_ticket(form, content, ticket_type)
             batch.append(row)
 
             if len(batch) >= 50:
