@@ -12,6 +12,32 @@ from shared.db import (
 
 bp = func.Blueprint()
 
+# The June-to-September 2026 forms outage: the nightly run reported success
+# every night while /formtypes looped and no form landed for three months.
+# Watching whether the ETL *ran* cannot catch that. Watching whether data
+# *arrived* can. 72 h rides over a normal weekend without a false alarm.
+FORMS_MAX_AGE_HOURS = 72
+
+
+def freshness_of(latest, now, max_age_hours=FORMS_MAX_AGE_HOURS) -> dict:
+    """Describe how old the newest row is. `latest` may be None (empty table)."""
+    if latest is None:
+        return {"latest_created_on": None, "age_hours": None,
+                "max_age_hours": max_age_hours, "stale": True}
+    age = (now - latest).total_seconds() / 3600
+    return {"latest_created_on": latest.isoformat(),
+            "age_hours": round(age, 1),
+            "max_age_hours": max_age_hours,
+            "stale": age > max_age_hours}
+
+
+def _forms_freshness() -> dict:
+    from datetime import datetime, timezone
+    row = query("SELECT MAX(created_on) AS latest FROM forms")
+    latest = row[0]["latest"] if row else None
+    return {"forms": freshness_of(latest, datetime.now(timezone.utc))}
+
+
 
 @bp.route(route="etl/status", methods=["GET"])
 @require_api_key
@@ -80,6 +106,7 @@ def get_etl_status(req: func.HttpRequest) -> func.HttpResponse:
         "sync_state": sync_state,
         "record_counts": counts,
         "new_since_yesterday": deltas,
+        "freshness": _forms_freshness(),
     })
 
 
@@ -137,6 +164,7 @@ def get_etl_summary(req: func.HttpRequest) -> func.HttpResponse:
         "sync_state": sync_state,
         "record_counts": counts,
         "new_since_yesterday": deltas,
+        "freshness": _forms_freshness(),
         "errors": {
             "unresolved_total": total_unresolved,
             "by_stage": error_counts,
