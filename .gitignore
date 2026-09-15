@@ -22,3 +22,19 @@ obj/
 .idea/
 *.swp
 .DS_Store
+
+# Local tooling / scratch (regenerable or machine-local)
+.claude/
+graphify-out/
+.coverage
+
+# Deployment artifacts — rebuilt, never committed
+*.zip
+*.bak
+
+# Scratch notes kept on disk only. These hold live API keys in cleartext;
+# committing them would publish credentials permanently. Rotate the keys and
+# delete the files rather than relying on this ignore.
+/Untitled.txt
+/\# Full sync (all stages).txt
+/$key = az functionapp config appset.txt
