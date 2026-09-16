@@ -3,6 +3,7 @@ shared/db.py
 Shared database connection pool, auth middleware, and response helpers.
 """
 import os
+import hmac
 import json
 import threading
 import psycopg2
@@ -33,7 +34,7 @@ def _get_secret(name: str) -> str:
     When USE_KEY_VAULT=true, underscore names are converted to dashes for KV lookup.
     Certain values are app settings resolved via KV references — read from os.environ.
     """
-    env_only = {"API_KEY", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PORT"}
+    env_only = {"API_KEY", "API_KEY_OLD", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PORT"}
     if name in env_only:
         return os.environ.get(name, "")
 
@@ -116,12 +117,22 @@ def execute(sql: str, params: tuple = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def require_api_key(func_handler):
-    """Decorator: validates X-API-Key header."""
+    """
+    Decorator: validates X-API-Key header.
+
+    Accepts API_KEY, and also API_KEY_OLD when that is set. The second slot
+    exists only so a key can be rotated without an outage: set API_KEY_OLD to
+    the outgoing key, move every caller to the new API_KEY, then clear
+    API_KEY_OLD. Leaving it set indefinitely keeps a retired key live, which
+    defeats the rotation — clear it as soon as callers are moved.
+    """
     @wraps(func_handler)
     def wrapper(req: func.HttpRequest) -> func.HttpResponse:
-        expected = _get_secret("API_KEY")
         provided = req.headers.get("X-API-Key", "")
-        if not expected or provided != expected:
+        accepted = [k for k in (_get_secret("API_KEY"), _get_secret("API_KEY_OLD")) if k]
+        # compare_digest over a non-empty accepted list: an unset API_KEY must
+        # never turn into "anything matches".
+        if not any(hmac.compare_digest(provided, k) for k in accepted):
             return error(401, "Unauthorized — invalid or missing X-API-Key header")
         return func_handler(req)
     return wrapper
