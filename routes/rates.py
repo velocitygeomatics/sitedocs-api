@@ -200,6 +200,83 @@ def update_rate(req: func.HttpRequest) -> func.HttpResponse:
         return error(500, str(e))
 
 
+# The category list is closed on purpose. These are the six headings the rate
+# workbook publishes, and the costed-ticket PDF groups line items by them, so a
+# typo here would silently create a seventh group that renders as its own
+# section. Adding a category is a deliberate change, not a side effect of a
+# rename.
+RATE_CATEGORIES = {
+    "PERSONNEL",
+    "EQUIPMENT",
+    "VEHICLES & TRANSPORT",
+    "DISBURSEMENTS",
+    "PLANS",
+    "FIXED DAY RATES",
+}
+
+
+@bp.route(route="rates/items/{slug}", methods=["PUT"])
+@require_api_key
+def update_rate_item(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    PUT /api/rates/items/{slug} - rename a rate item or move it to another
+    category.
+
+    The slug is the item's identity and is never changed here. VG-Time's
+    SERVICE_ITEMS table joins to vgt_rate_items.slug to cost a ticket, so
+    re-slugging on rename would silently break costing for every item that
+    referenced the old value. Only the display label and category move.
+    """
+    try:
+        slug = req.route_params.get("slug")
+        data = req.get_json()
+
+        item = query("SELECT id, line_item, category FROM vgt_rate_items WHERE slug = %s", (slug,))
+        if not item:
+            return not_found("Item")
+
+        line_item = data.get("lineItem", item[0]["line_item"])
+        category = data.get("category", item[0]["category"])
+
+        line_item = str(line_item or "").strip()
+        if not line_item:
+            return error(400, "lineItem cannot be empty")
+
+        category = str(category or "").strip().upper()
+        if category not in RATE_CATEGORIES:
+            return error(
+                400,
+                f"Unknown category {category!r}. Expected one of: "
+                + ", ".join(sorted(RATE_CATEGORIES)),
+            )
+
+        # A duplicate label is not a hard error — two schedules can legitimately
+        # carry similarly named lines — but an exact collision makes the grid
+        # ambiguous, so reject it rather than let two rows look identical.
+        clash = query(
+            "SELECT slug FROM vgt_rate_items WHERE lower(line_item) = lower(%s) AND slug <> %s",
+            (line_item, slug),
+        )
+        if clash:
+            return error(409, f"Another item already uses that name (slug {clash[0]['slug']})")
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vgt_rate_items SET line_item = %s, category = %s WHERE slug = %s",
+                    (line_item, category, slug),
+                )
+            conn.commit()
+        finally:
+            release_connection(conn)
+
+        return ok({"slug": slug, "lineItem": line_item, "category": category})
+    except Exception as e:
+        logging.exception("update_rate_item failed")
+        return error(500, str(e))
+
+
 @bp.route(route="rates/schedules/{id}/copy", methods=["POST"])
 @require_api_key
 def copy_schedule(req: func.HttpRequest) -> func.HttpResponse:
