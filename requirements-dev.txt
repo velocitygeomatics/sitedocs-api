@@ -1,0 +1,7 @@
+# Test-only dependencies. The runtime deps come from requirements.txt because
+# the suite imports the real modules (shared/db.py pulls in azure.functions and
+# psycopg2 at import time), so tests must run against the same versions the
+# function app deploys with.
+-r requirements.txt
+
+pytest
