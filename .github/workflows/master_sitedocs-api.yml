@@ -11,7 +11,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate. The CI workflow runs these same tests, but a deploy must not depend
+  # on another workflow having passed — the two race on a push, and a red CI
+  # run would not stop this one. Running them here is the only thing that
+  # actually blocks a bad deploy.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Pytest
+        run: python -m pytest tests/ -q
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read #This is required for actions/checkout
