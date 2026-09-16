@@ -198,3 +198,114 @@ def update_rate(req: func.HttpRequest) -> func.HttpResponse:
         return ok({"message": "Rate updated"})
     except Exception as e:
         return error(500, str(e))
+
+
+@bp.route(route="rates/schedules/{id}/copy", methods=["POST"])
+@require_api_key
+def copy_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST /api/rates/schedules/{id}/copy - clone a schedule and all its rates.
+
+    This is how a new year's card gets built: copy last year's, then edit the
+    handful of rates that moved. Copying only the header would leave the new
+    schedule costing everything at zero, so the rate rows come with it.
+    """
+    try:
+        sid = req.route_params.get("id")
+        data = req.get_json()
+        name = data.get("name")
+        key = data.get("schedule_key")
+        if not name or not key:
+            return error(400, "name and schedule_key required")
+
+        src = query(
+            "SELECT id, notes FROM vgt_rate_schedules WHERE id = %s", (sid,)
+        )
+        if not src:
+            return not_found("Schedule")
+
+        if query("SELECT 1 FROM vgt_rate_schedules WHERE schedule_key = %s", (key,)):
+            return error(409, f"schedule_key '{key}' already exists")
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vgt_rate_schedules (name, schedule_key, notes) "
+                    "VALUES (%s, %s, %s) RETURNING id",
+                    (name, key, src[0]["notes"]),
+                )
+                new_id = cur.fetchone()[0]
+                # Column list is explicit: a SELECT * would carry the source's
+                # primary key into the insert and collide.
+                cur.execute("""
+                    INSERT INTO vgt_schedule_rates
+                        (schedule_id, item_id, rate, unit, minimum_qty,
+                         ot_multiplier, ot_threshold, markup_percentage,
+                         day_rate_threshold)
+                    SELECT %s, item_id, rate, unit, minimum_qty,
+                           ot_multiplier, ot_threshold, markup_percentage,
+                           day_rate_threshold
+                      FROM vgt_schedule_rates
+                     WHERE schedule_id = %s
+                """, (new_id, src[0]["id"]))
+                copied = cur.rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_connection(conn)
+
+        return ok({"message": "Schedule copied", "id": new_id, "rates_copied": copied})
+    except Exception as e:
+        return error(500, str(e))
+
+
+@bp.route(route="rates/schedules/{id}", methods=["DELETE"])
+@require_api_key
+def delete_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    DELETE /api/rates/schedules/{id} - remove a schedule and its rate rows.
+
+    Refuses while any client still maps to the schedule. A mapped client whose
+    schedule vanished falls through to the default rate card, which silently
+    re-prices their work instead of failing — so this has to be a loud 409 and
+    not a cascade. Unmap the clients first.
+    """
+    try:
+        sid = req.route_params.get("id")
+
+        if not query("SELECT 1 FROM vgt_rate_schedules WHERE id = %s", (sid,)):
+            return not_found("Schedule")
+
+        clients = query(
+            "SELECT client_name FROM vgt_client_schedule_map "
+            "WHERE schedule_id = %s ORDER BY client_name",
+            (sid,),
+        )
+        if clients:
+            names = [c["client_name"] for c in clients]
+            return error(
+                409,
+                "Schedule is still mapped to "
+                f"{len(names)} client(s): {', '.join(names)}. "
+                "Reassign them before deleting.",
+            )
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM vgt_schedule_rates WHERE schedule_id = %s", (sid,))
+                removed = cur.rowcount
+                cur.execute("DELETE FROM vgt_rate_schedules WHERE id = %s", (sid,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_connection(conn)
+
+        return ok({"message": "Schedule deleted", "rates_removed": removed})
+    except Exception as e:
+        return error(500, str(e))
