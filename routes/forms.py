@@ -206,7 +206,8 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     """
     GET /api/time-tickets
     Query params: jobNo, client, crewChief, locationId,
-                  dateFrom, dateTo, isDeleted, ticketType, page, count
+                  dateFrom, dateTo, isDeleted, ticketType, exported,
+                  page, count
     """
     count, offset = parse_pagination(req)
     page = offset // count if count else 0
@@ -253,6 +254,20 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     if date_to:
         conditions.append("tt.ticket_date <= %s")
         params.append(date_to)
+
+    # exported=false is what the payroll queue asks for: it is the difference
+    # between fetching the whole table and fetching the handful still owed.
+    #
+    # The test is exported_on, not the row table. exported_on is only set when
+    # a ticket went out whole, so a partly-exported ticket has it NULL and
+    # stays in the unexported result with the rows it still owes. Filtering on
+    # "has any row stamp" would drop it and lose those rows silently.
+    exported = req.params.get("exported")
+    if exported is not None:
+        if exported.lower() == "true":
+            conditions.append("tt.exported_on IS NOT NULL")
+        else:
+            conditions.append("tt.exported_on IS NULL")
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
