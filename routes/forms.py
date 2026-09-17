@@ -280,6 +280,15 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
             tt.signed_by, tt.signed_on,
             tt.signature_lat, tt.signature_lng,
             tt.exported_on, tt.exported_by,
+            -- What has already gone out for this ticket, by component.
+            -- ['*'] means the whole ticket; a list of row keys means a
+            -- partial export and the rest are still owed. Empty means
+            -- nothing has been exported.
+            COALESCE((
+                SELECT array_agg(re.row_key ORDER BY re.row_key)
+                  FROM time_ticket_row_exports re
+                 WHERE re.form_id = tt.form_id
+            ), '{{}}') AS exported_rows,   -- doubled: this SQL is an f-string
             tt.etl_synced_on
         FROM time_tickets tt
         LEFT JOIN locations l ON l.id = tt.location_id
@@ -316,52 +325,111 @@ def get_time_ticket(req: func.HttpRequest) -> func.HttpResponse:
 def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
     """
     POST /api/time-tickets/export
-    Body: {"formIds": ["<uuid>", ...], "exportedBy": "name"}
+    Body: {"formIds": ["<uuid>", ...],
+           "rows": [{"formId": "<uuid>", "rowKey": "crew_chief"}, ...],
+           "exportedBy": "name"}
 
-    Stamps exported_on/exported_by — the positive marker that a ticket has
-    been pulled into a QuickBooks payroll run. Tickets already carrying a
-    stamp keep their original one, so re-running an export never rewrites
+    Stamps exported_on/exported_by — the positive marker that something has
+    been pulled into a QuickBooks payroll run. Anything already carrying a
+    stamp keeps its original one, so re-running an export never rewrites
     who exported it or when.
+
+    formIds is the whole-ticket stamp: the ticket is spoken for, every row
+    of it. rows is the partial one, naming the components that actually went
+    into the file so the rest stay in the queue. A caller exporting a mix
+    sends both in one request; at least one must be present.
+
+    The row set of a ticket is not derived here. VG-Time decides which
+    components a ticket has and which of them went out, and a second copy of
+    that rule in another language would drift from it.
     """
     try:
         body = req.get_json()
     except ValueError:
         return error(400, "Body must be JSON")
 
-    form_ids = body.get("formIds")
-    if not isinstance(form_ids, list) or not form_ids:
-        return error(400, "formIds must be a non-empty array")
+    form_ids = body.get("formIds") or []
+    rows_in = body.get("rows") or []
+    if not isinstance(form_ids, list) or not isinstance(rows_in, list):
+        return error(400, "formIds and rows must be arrays")
+    if not form_ids and not rows_in:
+        return error(400, "formIds or rows must be a non-empty array")
 
     try:
         form_ids = [str(uuid.UUID(str(f))) for f in form_ids]
     except (ValueError, AttributeError):
         return error(400, "formIds must all be UUIDs")
 
+    # A row with no key would land as a NULL primary key and take the whole
+    # request down, so the shape is checked before anything is written.
+    pairs = []
+    for r in rows_in:
+        if not isinstance(r, dict):
+            return error(400, "rows must be objects with formId and rowKey")
+        key = str(r.get("rowKey") or "").strip()
+        if not key:
+            return error(400, "every row needs a non-empty rowKey")
+        if key == "*":
+            return error(400, "rowKey \'*\' is the whole-ticket stamp — send it in formIds")
+        try:
+            pairs.append((str(uuid.UUID(str(r.get("formId")))), key))
+        except (ValueError, AttributeError):
+            return error(400, "every row needs a formId that is a UUID")
+
     exported_by = str(body.get("exportedBy") or "").strip() or "unknown"
 
-    # found vs marked separates "was already exported" from "no such ticket" —
-    # the caller needs to tell those apart, they mean very different things.
-    rows = execute("""
-        WITH upd AS (
-            UPDATE time_tickets
-               SET exported_on = NOW(),
-                   exported_by = %s
-             WHERE form_id = ANY(%s::uuid[])
-               AND exported_on IS NULL
+    marked = found = 0
+    if form_ids:
+        # found vs marked separates "was already exported" from "no such
+        # ticket" — the caller needs to tell those apart, they mean very
+        # different things. The '*' insert records the same fact at row
+        # granularity so one query answers what went out for a ticket.
+        rows = execute("""
+            WITH upd AS (
+                UPDATE time_tickets
+                   SET exported_on = NOW(),
+                       exported_by = %s
+                 WHERE form_id = ANY(%s::uuid[])
+                   AND exported_on IS NULL
+                RETURNING form_id
+            ), ins AS (
+                INSERT INTO time_ticket_row_exports (form_id, row_key, exported_by)
+                SELECT form_id, '*', %s
+                  FROM time_tickets
+                 WHERE form_id = ANY(%s::uuid[])
+                ON CONFLICT (form_id, row_key) DO NOTHING
+            )
+            SELECT (SELECT count(*) FROM upd) AS marked,
+                   (SELECT count(*) FROM time_tickets
+                     WHERE form_id = ANY(%s::uuid[])) AS found
+        """, (exported_by, form_ids, exported_by, form_ids, form_ids))
+        marked = rows[0]["marked"]
+        found = rows[0]["found"]
+
+    rows_marked = 0
+    if pairs:
+        # The ticket-level stamp is deliberately left alone: a partial export
+        # must not mark the ticket done, which is the whole reason this table
+        # exists. A component already exported keeps its original stamp, and
+        # a form_id with no ticket is dropped by the join rather than failing
+        # the request — the same tolerance formIds already gets above.
+        ins = execute("""
+            INSERT INTO time_ticket_row_exports (form_id, row_key, exported_by)
+            SELECT tt.form_id, p.row_key, %s
+              FROM unnest(%s::uuid[], %s::text[]) AS p(form_id, row_key)
+              JOIN time_tickets tt ON tt.form_id = p.form_id
+            ON CONFLICT (form_id, row_key) DO NOTHING
             RETURNING form_id
-        )
-        SELECT (SELECT count(*) FROM upd) AS marked,
-               (SELECT count(*) FROM time_tickets
-                 WHERE form_id = ANY(%s::uuid[])) AS found
-    """, (exported_by, form_ids, form_ids))
+        """, (exported_by, [p[0] for p in pairs], [p[1] for p in pairs]))
+        rows_marked = len(ins)
 
     total = len(set(form_ids))
-    marked = rows[0]["marked"]
-    found = rows[0]["found"]
     return ok({
         "marked": marked,
         "already": found - marked,
         "missing": total - found,
         "total": total,
+        "rowsMarked": rows_marked,
+        "rowsTotal": len(set(pairs)),
         "exportedBy": exported_by,
     })
