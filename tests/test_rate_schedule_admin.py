@@ -268,7 +268,9 @@ class UpdateClientScheduleTests(unittest.TestCase):
                 return [{"id": 1}] if sched else []
             return []
 
-        with mock.patch.object(rates, "query", fake_query),              mock.patch.object(rates, "get_connection", return_value=conn),              mock.patch.object(rates, "release_connection", lambda c: None):
+        with mock.patch.object(rates, "query", fake_query), \
+             mock.patch.object(rates, "get_connection", return_value=conn), \
+             mock.patch.object(rates, "release_connection", lambda c: None):
             res = _handler(rates.update_client_schedule)(
                 _req(
                     "PUT",
