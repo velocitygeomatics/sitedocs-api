@@ -56,7 +56,11 @@ class FreshnessOf(unittest.TestCase):
 
 class FormsFreshnessQuery(unittest.TestCase):
     def test_reads_max_created_on_from_forms(self):
-        latest = NOW - timedelta(hours=5)
+        # Off the real clock, not NOW: _forms_freshness calls
+        # datetime.now() itself, so a latest built from the frozen NOW
+        # aged past the 72 h threshold three days after NOW and the test
+        # began failing on its own.
+        latest = datetime.now(timezone.utc) - timedelta(hours=5)
         with mock.patch.object(etl, "query", return_value=[{"latest": latest}]) as q:
             out = etl._forms_freshness()
         self.assertIn("MAX(created_on)", q.call_args[0][0])
