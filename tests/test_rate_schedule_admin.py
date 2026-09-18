@@ -247,3 +247,67 @@ class DeleteRateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateClientScheduleTests(unittest.TestCase):
+    """Repointing one client at a different rate schedule.
+
+    The client map drives which schedule a ticket prices against and had no
+    write path at all, so reassigning a client meant editing Postgres by hand.
+    """
+
+    def _run(self, payload=None, client=True, sched=True):
+        log = []
+        cur = _FakeCursor(log, rowcount=1)
+        conn = _FakeConn(cur)
+
+        def fake_query(sql, params=None):
+            if "vgt_client_schedule_map" in sql:
+                return [{"id": 11}] if client else []
+            if "vgt_rate_schedules" in sql:
+                return [{"id": 1}] if sched else []
+            return []
+
+        with mock.patch.object(rates, "query", fake_query),              mock.patch.object(rates, "get_connection", return_value=conn),              mock.patch.object(rates, "release_connection", lambda c: None):
+            res = _handler(rates.update_client_schedule)(
+                _req(
+                    "PUT",
+                    "/api/rates/clients/Whitecap",
+                    body={"schedule_key": "vg_standard_2025"} if payload is None else payload,
+                    route_params={"client_name": "Whitecap"},
+                )
+            )
+        return res, log, conn
+
+    def test_moves_the_client_to_the_named_schedule(self):
+        res, log, conn = self._run()
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(conn.committed)
+
+        sql, params = log[0]
+        self.assertIn("UPDATE vgt_client_schedule_map", sql)
+        self.assertIn("schedule_id", sql)
+        # Scoped by the map row's own id. Keyed on schedule_id instead, this
+        # would move every client that shared the old schedule.
+        self.assertEqual(params, (1, 11))
+
+    def test_unknown_client_is_404_before_any_write(self):
+        res, log, conn = self._run(client=False)
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(log, [])
+        self.assertFalse(conn.committed)
+
+    def test_unknown_schedule_is_404_before_any_write(self):
+        # A typo must not park a live client on a schedule that does not exist,
+        # which would price every one of their lines at $0.
+        res, log, conn = self._run(sched=False)
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(log, [])
+        self.assertFalse(conn.committed)
+
+    def test_missing_schedule_key_is_400(self):
+        res, log, conn = self._run(payload={})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(log, [])
+

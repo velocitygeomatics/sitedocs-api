@@ -255,6 +255,64 @@ def delete_rate(req: func.HttpRequest) -> func.HttpResponse:
         return error(500, str(e))
 
 
+@bp.route(route="rates/clients/{client_name}", methods=["PUT"])
+@require_api_key
+def update_client_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    PUT /api/rates/clients/{client_name} - point one client at a schedule.
+
+    The client map decides which schedule a survey ticket prices against, and
+    until now it was readable but not writable: /api/rates returned it and
+    nothing could change it short of editing Postgres by hand.
+
+    Matching is on the exact stored client_name, not the substring test
+    matchRateSchedule() uses at ticket time. "EPFC" and "EPFC (190319)" are two
+    rows and have to be moved separately, or one of them silently keeps its old
+    schedule while the other reports success.
+
+    404s on an unknown client or schedule rather than inserting, so a typo
+    cannot quietly create a new mapping that shadows a real one.
+    """
+    try:
+        client_name = req.route_params.get("client_name")
+        body = req.get_json()
+        sk = body.get("schedule_key")
+
+        if not sk:
+            return error(400, "schedule_key is required")
+
+        client = query(
+            "SELECT id FROM vgt_client_schedule_map WHERE client_name = %s",
+            (client_name,),
+        )
+        sched = query("SELECT id FROM vgt_rate_schedules WHERE schedule_key = %s", (sk,))
+
+        if not client or not sched:
+            return not_found("Client or Schedule")
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vgt_client_schedule_map SET schedule_id = %s WHERE id = %s",
+                    (sched[0]["id"], client[0]["id"]),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_connection(conn)
+
+        return ok({
+            "message": "Client reassigned",
+            "client_name": client_name,
+            "schedule_key": sk,
+        })
+    except Exception as e:
+        return error(500, str(e))
+
+
 # The category list is closed on purpose. These are the six headings the rate
 # workbook publishes, and the costed-ticket PDF groups line items by them, so a
 # typo here would silently create a seventh group that renders as its own
