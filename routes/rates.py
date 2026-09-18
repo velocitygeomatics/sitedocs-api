@@ -200,6 +200,61 @@ def update_rate(req: func.HttpRequest) -> func.HttpResponse:
         return error(500, str(e))
 
 
+@bp.route(route="rates/items/{slug}/{sched_key}", methods=["DELETE"])
+@require_api_key
+def delete_rate(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    DELETE /api/rates/items/{slug}/{sched_key} - unset one rate on one schedule.
+
+    update_rate is an upsert, so until this existed there was no way to take a
+    line back off a schedule: setting it to 0 leaves the row in place and the
+    item still reads as priced. Pruning a schedule meant editing the table by
+    hand.
+
+    Unsetting is not the same as pricing at zero. A slug with no row costs the
+    line at the schedule's own default and the UI greys it as a placeholder; a
+    slug priced at 0.00 bills nothing and looks deliberate. The distinction is
+    the reason this is a DELETE and not `PUT {rate: 0}`.
+
+    404s when the schedule carries no such rate, rather than reporting success,
+    so a mistyped slug cannot read as a completed prune.
+    """
+    try:
+        slug = req.route_params.get("slug")
+        sk = req.route_params.get("sched_key")
+
+        item = query("SELECT id FROM vgt_rate_items WHERE slug = %s", (slug,))
+        sched = query("SELECT id FROM vgt_rate_schedules WHERE schedule_key = %s", (sk,))
+
+        if not item or not sched:
+            return not_found("Item or Schedule")
+
+        iid = item[0]["id"]
+        sid = sched[0]["id"]
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM vgt_schedule_rates WHERE schedule_id = %s AND item_id = %s",
+                    (sid, iid),
+                )
+                removed = cur.rowcount
+            if not removed:
+                conn.rollback()
+                return not_found("Rate")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_connection(conn)
+
+        return ok({"message": "Rate removed", "slug": slug, "schedule_key": sk})
+    except Exception as e:
+        return error(500, str(e))
+
+
 # The category list is closed on purpose. These are the six headings the rate
 # workbook publishes, and the costed-ticket PDF groups line items by them, so a
 # typo here would silently create a seventh group that renders as its own

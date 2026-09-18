@@ -177,6 +177,73 @@ class CopyScheduleTests(unittest.TestCase):
         res, _, _ = self._run({"name": "No key"})
         self.assertEqual(res.status_code, 400)
 
+class DeleteRateTests(unittest.TestCase):
+    """Unsetting one rate on one schedule.
+
+    update_rate is an upsert, so a schedule could only ever gain lines. Pruning
+    one meant editing the table by hand, which is how a rate nobody wanted
+    stayed priced on a live schedule.
+    """
+
+    def _run(self, rowcount=1, item=True, sched=True):
+        log = []
+        cur = _FakeCursor(log, rowcount=rowcount)
+        conn = _FakeConn(cur)
+
+        def fake_query(sql, params=None):
+            if "vgt_rate_items" in sql:
+                return [{"id": 7}] if item else []
+            if "vgt_rate_schedules" in sql:
+                return [{"id": 3}] if sched else []
+            return []
+
+        with mock.patch.object(rates, "query", fake_query), \
+             mock.patch.object(rates, "get_connection", return_value=conn), \
+             mock.patch.object(rates, "release_connection", lambda c: None):
+            res = _handler(rates.delete_rate)(
+                _req(
+                    "DELETE",
+                    "/api/rates/items/field_assistant/environmental_2026",
+                    route_params={"slug": "field_assistant", "sched_key": "environmental_2026"},
+                )
+            )
+        return res, log, conn
+
+    def test_removes_only_that_schedule_s_row(self):
+        res, log, conn = self._run()
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(conn.committed)
+
+        sql, params = log[0]
+        self.assertIn("DELETE FROM vgt_schedule_rates", sql)
+        # Both keys must be in the WHERE clause. Scoped to the item alone this
+        # would strip the rate from every schedule that prices it.
+        self.assertIn("schedule_id", sql)
+        self.assertIn("item_id", sql)
+        self.assertEqual(params, (3, 7))
+
+    def test_unknown_slug_is_404_before_any_write(self):
+        res, log, conn = self._run(item=False)
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(log, [])
+        self.assertFalse(conn.committed)
+
+    def test_unknown_schedule_is_404_before_any_write(self):
+        res, log, conn = self._run(sched=False)
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(log, [])
+        self.assertFalse(conn.committed)
+
+    def test_a_rate_that_was_never_set_is_404_not_a_silent_success(self):
+        """A mistyped slug must not read back as a completed prune."""
+        res, _, conn = self._run(rowcount=0)
+        self.assertEqual(res.status_code, 404)
+        self.assertFalse(conn.committed)
+        self.assertTrue(conn.rolled_back)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
