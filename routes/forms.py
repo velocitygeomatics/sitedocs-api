@@ -4,6 +4,7 @@ Blueprints for: forms, attachments, time_tickets
 """
 
 
+import logging
 import uuid
 
 import azure.functions as func
@@ -439,6 +440,22 @@ def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
         rows_marked = len(ins)
 
     total = len(set(form_ids))
+
+    # The run itself. Recorded after the stamping so it carries what actually
+    # happened rather than what was asked for, and in the same request so a
+    # run can never go unlogged. A logging failure must not fail the export -
+    # the stamps are the operative fact and are already committed - so this is
+    # best-effort and reports itself in the response instead.
+    run_id = None
+    try:
+        run_id = _log_export_run(
+            body, exported_by, form_ids, pairs,
+            marked=marked, already=found - marked,
+            missing=total - found, rows_marked=rows_marked,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        logging.exception("export run log failed: %s", exc)
+
     return ok({
         "marked": marked,
         "already": found - marked,
@@ -447,4 +464,115 @@ def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
         "rowsMarked": rows_marked,
         "rowsTotal": len(set(pairs)),
         "exportedBy": exported_by,
+        "runId": run_id,
+        "runLogged": run_id is not None,
     })
+
+
+def _log_export_run(body, exported_by, form_ids, pairs, *,
+                    marked, already, missing, rows_marked):
+    """
+    Write one time_ticket_export_runs row plus its contents, and return the
+    run_id. The caller supplies the descriptive fields - filename, IIF line
+    count, hours, employees - because only VG-Time knows them; none of them
+    can be derived from the stamps.
+    """
+    run_id = str(uuid.uuid4())
+
+    def _int(name):
+        try:
+            v = body.get(name)
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        total_hours = float(body.get("totalHours")) if body.get("totalHours") is not None else None
+    except (TypeError, ValueError):
+        total_hours = None
+
+    employees = body.get("employees")
+    employees = [str(e) for e in employees] if isinstance(employees, list) else []
+    file_name = str(body.get("fileName") or "").strip() or None
+
+    execute("""
+        INSERT INTO time_ticket_export_runs
+            (run_id, exported_by, file_name, iif_lines, total_hours, employees,
+             tickets_marked, tickets_already, tickets_missing, rows_marked)
+        VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (run_id, exported_by, file_name, _int("iifLines"), total_hours,
+          employees, marked, already, missing, rows_marked))
+
+    # Whole tickets go in as '*', matching time_ticket_row_exports. A form_id
+    # with no ticket is dropped by the join, the same tolerance the stamping
+    # above gives it, so a stale id cannot fail the log.
+    items = [(f, "*") for f in set(form_ids)] + [(f, k) for f, k in set(pairs)]
+    if items:
+        execute("""
+            INSERT INTO time_ticket_export_run_items (run_id, form_id, row_key)
+            SELECT %s::uuid, tt.form_id, p.row_key
+              FROM unnest(%s::uuid[], %s::text[]) AS p(form_id, row_key)
+              JOIN time_tickets tt ON tt.form_id = p.form_id
+            ON CONFLICT DO NOTHING
+        """, (run_id, [i[0] for i in items], [i[1] for i in items]))
+
+    return run_id
+
+
+@bp.route(route="time-tickets/exports", methods=["GET"])
+@require_api_key
+def list_time_ticket_export_runs(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/time-tickets/exports
+    Query params: page, count
+
+    The export-run log behind VG-Time's History tab, newest first.
+    """
+    count, offset = parse_pagination(req)
+    page = offset // count if count else 0
+
+    total = query("SELECT count(*) AS n FROM time_ticket_export_runs")[0]["n"]
+    runs = query("""
+        SELECT r.run_id, r.run_at, r.exported_by, r.file_name, r.iif_lines,
+               r.total_hours, r.employees, r.tickets_marked, r.tickets_already,
+               r.tickets_missing, r.rows_marked,
+               (SELECT count(DISTINCT i.form_id)
+                  FROM time_ticket_export_run_items i
+                 WHERE i.run_id = r.run_id) AS ticket_count
+          FROM time_ticket_export_runs r
+         ORDER BY r.run_at DESC
+         LIMIT %s OFFSET %s
+    """, (count, offset))
+
+    ids = [r["run_id"] for r in runs]
+    by_run = {}
+    if ids:
+        for row in query("""
+            SELECT run_id, form_id, row_key
+              FROM time_ticket_export_run_items
+             WHERE run_id = ANY(%s::uuid[])
+        """, (ids,)):
+            by_run.setdefault(str(row["run_id"]), []).append(
+                {"formId": str(row["form_id"]), "rowKey": row["row_key"]}
+            )
+
+    data = []
+    for r in runs:
+        rid = str(r["run_id"])
+        data.append({
+            "runId": rid,
+            "runAt": r["run_at"].isoformat() if r["run_at"] else None,
+            "exportedBy": r["exported_by"],
+            "fileName": r["file_name"],
+            "iifLines": r["iif_lines"],
+            "totalHours": float(r["total_hours"]) if r["total_hours"] is not None else None,
+            "employees": list(r["employees"] or []),
+            "ticketCount": r["ticket_count"],
+            "marked": r["tickets_marked"],
+            "already": r["tickets_already"],
+            "missing": r["tickets_missing"],
+            "rowsMarked": r["rows_marked"],
+            "items": by_run.get(rid, []),
+        })
+
+    return ok(paginated_response(data, total, page, count))
