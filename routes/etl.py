@@ -1,13 +1,13 @@
 """
 routes/etl.py
-Blueprints for ETL management: status, summary, errors, trigger.
+Blueprints for ETL management: status, summary, errors, runs, trigger.
 """
 
 import logging
 import azure.functions as func
 from shared.db import (
     query, get_connection, release_connection, require_api_key,
-    ok, not_found,
+    ok, not_found, parse_pagination, paginated_response,
 )
 
 bp = func.Blueprint()
@@ -211,6 +211,62 @@ def get_etl_errors(req: func.HttpRequest) -> func.HttpResponse:
     return ok(rows)
 
 
+@bp.route(route="etl/runs", methods=["GET"])
+@require_api_key
+def get_etl_runs(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/etl/runs
+    Query params: stage, trigger, status, page, count
+
+    The ETL run log behind VG-Time's History tab, newest first. One row per
+    stage per invocation, so a chained hourly run appears as its three stages
+    rather than one opaque success.
+    """
+    conditions = []
+    params = []
+    for column, value in (
+        ("stage", req.params.get("stage")),
+        ("trigger", req.params.get("trigger")),
+        ("status", req.params.get("status")),
+    ):
+        if value:
+            # "trigger" is reserved in postgres; quote every column rather than
+            # special-casing one of them.
+            conditions.append(f'"{column}" = %s')
+            params.append(value)
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    count, offset = parse_pagination(req)
+    page = offset // count if count else 0
+
+    total = query(f"SELECT count(*) AS n FROM etl_runs {where}",
+                  tuple(params))[0]["n"]
+    rows = query(f"""
+        SELECT run_id, stage, "trigger", started_at, finished_at,
+               duration_s, status, error, entities
+          FROM etl_runs
+        {where}
+         ORDER BY started_at DESC
+         LIMIT %s OFFSET %s
+    """, tuple(params + [count, offset]))
+
+    data = [{
+        "runId": str(r["run_id"]),
+        "stage": r["stage"],
+        "trigger": r["trigger"],
+        "startedAt": r["started_at"].isoformat() if r["started_at"] else None,
+        "finishedAt": r["finished_at"].isoformat() if r["finished_at"] else None,
+        "durationS": float(r["duration_s"]) if r["duration_s"] is not None else None,
+        "status": r["status"],
+        "error": r["error"],
+        # {entity: rows stamped}. Empty means the stage ran and stamped nothing,
+        # which is a real outcome and not the same as a failure.
+        "entities": r["entities"] or {},
+    } for r in rows]
+
+    return ok(paginated_response(data, total, page, count))
+
+
 @bp.route(route="etl/errors/{id}/resolve", methods=["POST"])
 @require_api_key
 def resolve_etl_error(req: func.HttpRequest) -> func.HttpResponse:
@@ -254,6 +310,7 @@ def manual_etl_trigger(req: func.HttpRequest) -> func.HttpResponse:
         cmd += ["--only", only]
     if mode in ("new", "all"):
         cmd += ["--mode", mode]
+    cmd += ["--label", "manual"]
 
     def run():
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)

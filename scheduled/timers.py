@@ -28,7 +28,9 @@ def _run_etl_streaming(label: str, args: list[str]) -> int:
     Returns the subprocess exit code (or -1 if it failed to launch)."""
     import subprocess
     import sys
-    cmd = [sys.executable, "-m", "etl.run_etl", *args]
+    # --label lands in etl_runs.trigger, so the History tab can tell an hourly
+    # run from a nightly one from a manual re-run at the same minute.
+    cmd = [sys.executable, "-m", "etl.run_etl", *args, "--label", label]
     log.info(f"{label}: starting ({' '.join(args) or 'full'})")
     try:
         proc = subprocess.Popen(

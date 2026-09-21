@@ -30,6 +30,7 @@ Usage:
 """
 
 import sys
+import uuid
 import logging
 import argparse
 from datetime import datetime, timezone
@@ -50,7 +51,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("etl.orchestrator")
 
-from .utils import get_db_conn, ensure_state_table, log_etl_error
+from .utils import (
+    get_db_conn, ensure_state_table, log_etl_error,
+    snapshot_sync_state, diff_sync_state, record_etl_run,
+)
 from . import (
     sync_lookups,
     sync_companies,
@@ -90,7 +94,21 @@ def _build_stages(mode: str, conn):
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def run_etl(only: str = None, dry_run: bool = False, mode: str = "all"):
+def _record(conn, run_id, stage_name, label, stage_start, state_before,
+            status, error):
+    """Log one stage to etl_runs, diffing etl_sync_state to see what it touched."""
+    try:
+        touched = diff_sync_state(state_before, snapshot_sync_state(conn))
+    except Exception:
+        touched = {}
+    record_etl_run(
+        conn, run_id, stage_name, label, stage_start,
+        datetime.now(timezone.utc), status, error, touched,
+    )
+
+
+def run_etl(only: str = None, dry_run: bool = False, mode: str = "all",
+            label: str = "cli"):
     start = datetime.now(timezone.utc)
     log.info(f"ETL started at {start.isoformat()}")
 
@@ -113,12 +131,16 @@ def run_etl(only: str = None, dry_run: bool = False, mode: str = "all"):
         log.info(f"{'='*50}")
         log.info(f"STAGE: {stage_name}")
         stage_start = datetime.now(timezone.utc)
+        run_id = uuid.uuid4()
+        state_before = snapshot_sync_state(conn)
 
         try:
             stage_fn(conn)
             elapsed = (datetime.now(timezone.utc) - stage_start).total_seconds()
             results[stage_name] = {"status": "ok", "elapsed_s": round(elapsed, 1)}
             log.info(f"STAGE {stage_name} completed in {elapsed:.1f}s")
+            _record(conn, run_id, stage_name, label, stage_start,
+                    state_before, "ok", None)
 
         except Exception as e:
             elapsed = (datetime.now(timezone.utc) - stage_start).total_seconds()
@@ -129,6 +151,10 @@ def run_etl(only: str = None, dry_run: bool = False, mode: str = "all"):
             except Exception:
                 pass
             log_etl_error(conn, stage_name, None, e)
+            # After the rollback, so the failed stage still leaves a row. This
+            # is the case the History tab exists for.
+            _record(conn, run_id, stage_name, label, stage_start,
+                    state_before, "error", str(e))
 
     conn.close()
 
@@ -172,5 +198,11 @@ if __name__ == "__main__":
         default="all",
         help="new = only time tickets modified since last sync; all = full sync (default)",
     )
+    parser.add_argument(
+        "--label",
+        default="cli",
+        help="Who started this run - recorded in etl_runs.trigger "
+             "(e.g. hourly_incremental_sync, manual). Defaults to cli.",
+    )
     args = parser.parse_args()
-    run_etl(only=args.only, dry_run=args.dry_run, mode=args.mode)
+    run_etl(only=args.only, dry_run=args.dry_run, mode=args.mode, label=args.label)

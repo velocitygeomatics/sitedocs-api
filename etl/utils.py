@@ -209,11 +209,95 @@ CREATE TABLE IF NOT EXISTS etl_errors (
 """
 
 
+ENSURE_RUNS_TABLE = """
+CREATE TABLE IF NOT EXISTS etl_runs (
+    run_id      UUID        PRIMARY KEY,
+    stage       TEXT        NOT NULL,
+    trigger     TEXT        NOT NULL DEFAULT 'cli',
+    started_at  TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    duration_s  NUMERIC(10,1),
+    status      TEXT        NOT NULL,
+    error       TEXT,
+    entities    JSONB       NOT NULL DEFAULT '{}'::jsonb
+);
+"""
+
+ENSURE_RUNS_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_etl_runs_started_at ON etl_runs (started_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_etl_runs_stage_started_at ON etl_runs (stage, started_at DESC);",
+)
+
+
 def ensure_state_table(conn):
     with conn.cursor() as cur:
         cur.execute(ENSURE_STATE_TABLE)
         cur.execute(ENSURE_ERRORS_TABLE)
+        cur.execute(ENSURE_RUNS_TABLE)
+        for stmt in ENSURE_RUNS_INDEXES:
+            cur.execute(stmt)
     conn.commit()
+
+
+def snapshot_sync_state(conn) -> dict:
+    """entity -> (last_sync, last_count) for every row in etl_sync_state.
+
+    Taken either side of a stage so the run log can record what the stage
+    actually stamped. The stage functions return None and several of them
+    (lookups, companies) touch more than one entity, so diffing the state
+    table is the only honest source for this.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT entity, last_sync, last_count FROM etl_sync_state")
+        return {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+
+def diff_sync_state(before: dict, after: dict) -> dict:
+    """entity -> count, for entities whose last_sync moved between snapshots.
+
+    An entity the stage re-stamped with the same count still counts as
+    touched, because last_sync advances; one it never reached does not appear
+    at all. Both are more useful than a single number for the whole stage.
+    """
+    touched = {}
+    for entity, (last_sync, count) in after.items():
+        prior = before.get(entity)
+        if prior is None or prior[0] != last_sync:
+            touched[entity] = count
+    return touched
+
+
+def record_etl_run(conn, run_id, stage: str, trigger: str, started_at,
+                   finished_at, status: str, error: str = None,
+                   entities: dict = None) -> bool:
+    """Write one stage's outcome to etl_runs. Best-effort.
+
+    The sync itself is the operative fact and is already committed by the time
+    this runs, so a failure to log must not fail the stage - losing a sync to a
+    history write would be the worse outcome. Returns whether the row landed.
+    """
+    try:
+        duration = (finished_at - started_at).total_seconds()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO etl_runs (run_id, stage, trigger, started_at,
+                                      finished_at, duration_s, status, error, entities)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """, (
+                str(run_id), stage, trigger, started_at, finished_at,
+                round(duration, 1), status,
+                error[:2000] if error else None,
+                json.dumps(entities or {}),
+            ))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"Failed to record etl_run for stage {stage}: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
 
 
 def log_etl_error(conn, stage: str, entity_id: str, error: Exception,
