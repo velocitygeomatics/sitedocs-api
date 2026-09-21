@@ -118,8 +118,18 @@ def nightly_time_tickets_sync(nightlyTimeTicketsTimer: func.TimerRequest) -> Non
     run_on_startup=False,
 )
 def hourly_incremental_sync(hourlyTimer: func.TimerRequest) -> None:
-    """Incremental forms + time tickets sync - runs every hour."""
-    _run_etl_streaming("hourly_incremental_sync", ["--only", "forms", "--mode", "new"])
+    """Incremental forms + time tickets sync - runs every hour.
+
+    time_tickets is rebuilt from the form_contents cache, so all three stages
+    have to run in order for a ticket submitted today to reach the table."""
+    for args in (
+        ["--only", "forms", "--mode", "new"],
+        ["--only", "form_contents", "--mode", "new"],
+        ["--only", "time_tickets", "--mode", "new"],
+    ):
+        if _run_etl_streaming("hourly_incremental_sync", args) != 0:
+            log.error("hourly_incremental_sync: aborting chain after %s", " ".join(args))
+            break
 
 
 # ---------------------------------------------------------------------------
