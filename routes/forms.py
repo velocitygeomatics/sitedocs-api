@@ -317,7 +317,10 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     return ok(paginated_response(rows, total, page, count))
 
 
-@bp.route(route="time-tickets/{formId}", methods=["GET"])
+# The :guid constraint is what keeps this off /time-tickets/exports. Without it
+# the host matched "exports" here first, Postgres rejected it as a uuid, and the
+# History tab's hydration got a 500 it swallowed - so the tab stayed empty.
+@bp.route(route="time-tickets/{formId:guid}", methods=["GET"])
 @require_api_key
 def get_time_ticket(req: func.HttpRequest) -> func.HttpResponse:
     """GET /api/time-tickets/{formId}"""

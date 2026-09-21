@@ -342,6 +342,15 @@ class ExportRunList(unittest.TestCase):
             res = forms.list_time_ticket_export_runs.build().get_user_function()(req)
         return res.status_code, json.loads(res.get_body())
 
+    def test_single_ticket_route_cannot_swallow_the_exports_path(self):
+        # /time-tickets/exports must never be routed to get_time_ticket with
+        # formId="exports". The guid constraint is the only thing preventing it.
+        route = next(
+            b.route for b in forms.get_time_ticket.build().get_bindings()
+            if getattr(b, "route", None)
+        )
+        self.assertEqual(route, "time-tickets/{formId:guid}")
+
     def test_runs_come_back_with_their_contents_attached(self):
         import datetime as dt
         run = {
