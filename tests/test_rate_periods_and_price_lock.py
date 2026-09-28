@@ -304,5 +304,35 @@ class LockedPricesOnTicketList(unittest.TestCase):
         self.assertEqual(rows[0]["locked_prices"], {})
 
 
+class JobClientsOnTicketList(unittest.TestCase):
+    def test_each_ticket_gets_its_jobs_client_by_trimmed_job_number(self):
+        rows = [{"job_no": " 260393 "}, {"job_no": "260393"}, {"job_no": "N/A"}, {"job_no": None}]
+        found = [
+            {"job_no": "260393", "name": "Whitecap Resources Inc.", "code": "2015G0013", "source": "latitude"},
+            {"job_no": "N/A", "name": None, "code": None, "source": None},
+        ]
+        with mock.patch.object(forms, "query", return_value=found) as q:
+            forms._attach_job_clients(rows)
+        self.assertEqual(q.call_args[0][1], (["260393", "N/A"],))
+        self.assertEqual(rows[0]["job_client"], "Whitecap Resources Inc.")
+        self.assertEqual(rows[1]["job_client_source"], "latitude")
+        self.assertIsNone(rows[2]["job_client"])
+        self.assertIsNone(rows[3]["job_client_code"])
+
+    def test_no_job_numbers_skips_the_query(self):
+        rows = [{"job_no": ""}]
+        with mock.patch.object(forms, "query") as q:
+            forms._attach_job_clients(rows)
+        q.assert_not_called()
+        self.assertIsNone(rows[0]["job_client"])
+
+    def test_an_unreadable_latitude_copy_leaves_the_typed_client(self):
+        rows = [{"job_no": "260393", "client": "Whitecap"}]
+        with mock.patch.object(forms, "query", side_effect=RuntimeError("boom")):
+            forms._attach_job_clients(rows)
+        self.assertIsNone(rows[0]["job_client"])
+        self.assertEqual(rows[0]["client"], "Whitecap")
+
+
 if __name__ == "__main__":
     unittest.main()

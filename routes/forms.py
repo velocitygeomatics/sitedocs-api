@@ -315,7 +315,58 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     params.extend([count, offset])
     rows = query(sql, tuple(params))
     _attach_locked_prices(rows)
+    _attach_job_clients(rows)
     return ok(paginated_response(rows, total, page, count))
+
+
+def _attach_job_clients(rows):
+    """
+    Give each ticket the client its job belongs to: job_client (the Latitude
+    company name), job_client_code, and job_client_source ('latitude' or
+    'job_setup'). A ticket prices on this client, not the typed one, so
+    "Vermillion" and "Petrus" land on the right schedule.
+
+    Latitude answers first: it carries any correction made after the job was
+    set up (job 260393 was created for Allwest and moved to Whitecap there).
+    Job Setup covers jobs created since the last nightly Latitude snapshot.
+    The job number must match exactly - "160176" is not job 160176P, which is
+    a different client's.
+
+    No match leaves the three fields null and the ticket prices on its typed
+    client, which VG-Time flags for review. Best-effort for the same reason as
+    the locked prices: without it every ticket prices as it did before.
+    """
+    for r in rows:
+        r["job_client"] = r["job_client_code"] = r["job_client_source"] = None
+    jobs = sorted({(r.get("job_no") or "").strip() for r in rows} - {""})
+    if not jobs:
+        return
+    try:
+        found = query("""
+            SELECT j.job_no,
+                   CASE WHEN lc."Company_Name" IS NOT NULL THEN lc."Company_Name"
+                        ELSE sc."Company_Name" END AS name,
+                   CASE WHEN lc."Company_Name" IS NOT NULL THEN lj."Client"
+                        ELSE js.client_code END AS code,
+                   CASE WHEN lc."Company_Name" IS NOT NULL THEN 'latitude'
+                        WHEN sc."Company_Name" IS NOT NULL THEN 'job_setup' END AS source
+              FROM unnest(%s::text[]) AS j(job_no)
+              LEFT JOIN LATERAL (SELECT "Client" FROM latitude."tblJobs"
+                                  WHERE "Job_Number" = j.job_no LIMIT 1) lj ON true
+              LEFT JOIN latitude."tblClients" lc ON lc."Client_Code" = lj."Client"
+              LEFT JOIN public.job_setup js ON js.job_number = j.job_no
+              LEFT JOIN latitude."tblClients" sc ON sc."Client_Code" = js.client_code
+        """, (jobs,))
+    except Exception as exc:  # noqa: BLE001 - degrade to the typed client
+        logging.warning("job clients unavailable: %s", exc)
+        return
+    by_job = {f["job_no"]: f for f in found if f["name"]}
+    for r in rows:
+        f = by_job.get((r.get("job_no") or "").strip())
+        if f:
+            r["job_client"] = f["name"]
+            r["job_client_code"] = f["code"]
+            r["job_client_source"] = f["source"]
 
 
 def _attach_locked_prices(rows):
