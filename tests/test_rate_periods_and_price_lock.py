@@ -150,6 +150,57 @@ class ReassignWithEffectiveDate(unittest.TestCase):
         self.assertRegex(payload["effective_from"], r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _add(body, existing=("Whitecap", "Storm")):
+    log = []
+    conn = _Conn(_Cursor(log, (77,)))
+
+    def fake_query(sql, params=None):
+        if "vgt_client_schedule_map" in sql:
+            return [{"client_name": n} for n in existing]
+        if "vgt_rate_schedules" in sql:
+            ids = {"vg_standard_2025": 1, "municipal": 6}
+            return [{"id": ids[k], "schedule_key": k} for k in params if k in ids]
+        return []
+
+    with mock.patch.object(rates, "query", fake_query), \
+         mock.patch.object(rates, "get_connection", return_value=conn), \
+         mock.patch.object(rates, "release_connection"):
+        res = _handler(rates.add_client)(_req("POST", "/api/rates/clients", body))
+    return res.status_code, json.loads(res.get_body()), log, conn
+
+
+class AddClient(unittest.TestCase):
+    def test_default_until_the_day_before_then_the_chosen_schedule_logged_as_a_change(self):
+        status, payload, log, conn = _add({
+            "client_name": "  Town  of ", "schedule_key": "municipal",
+            "effective_from": "2026-09-01", "changed_by": "Norm",
+        })
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(conn.committed)
+        inserts = [p for s, p in log if s.startswith("INSERT")]
+        self.assertEqual(inserts[0], ("Town of", 6, "Added in VG-Time"))
+        # client, default schedule, up to the day before, who, note
+        self.assertEqual(inserts[1][:3], (77, 1, date(2026, 8, 31)))
+        # client, chosen schedule, from, previous (the default), who, note
+        self.assertEqual(inserts[2], (77, 6, date(2026, 9, 1), 1, "Norm", "Client added"))
+
+    def test_a_name_an_existing_entry_already_catches_is_refused(self):
+        status, payload, log, conn = _add({"client_name": "Whitecap Resources",
+                                           "schedule_key": "municipal"})
+        self.assertEqual(status, 409)
+        self.assertIn("Whitecap", payload["error"])
+        self.assertEqual(log, [])
+
+    def test_an_existing_name_in_another_case_is_refused(self):
+        status, _, log, _ = _add({"client_name": "STORM", "schedule_key": "municipal"})
+        self.assertEqual(status, 409)
+        self.assertEqual(log, [])
+
+    def test_unknown_schedule_and_missing_name(self):
+        self.assertEqual(_add({"client_name": "Teine", "schedule_key": "nope"})[0], 404)
+        self.assertEqual(_add({"client_name": " ", "schedule_key": "municipal"})[0], 400)
+
+
 class RatesPayloadPeriods(unittest.TestCase):
     def test_periods_ride_along_and_a_missing_table_does_not_take_rates_down(self):
         def fake_query(sql, params=None):

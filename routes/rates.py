@@ -442,6 +442,105 @@ def update_client_schedule(req: func.HttpRequest) -> func.HttpResponse:
         return error(500, str(e))
 
 
+# What a client with no entry prices on: VG-Time's DEFAULT_SCHEDULE_ID.
+DEFAULT_SCHEDULE_KEY = "vg_standard_2025"
+
+
+@bp.route(route="rates/clients", methods=["POST"])
+@require_api_key
+def add_client(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    POST /api/rates/clients
+    Body: {"client_name": "...", "schedule_key": "...", "effective_from": "YYYY-MM-DD",
+           "changed_by": "...", "note": "..."}
+
+    Gives a client its own entry. Until now its tickets priced on the default
+    schedule, so the history records exactly that: the default up to the day
+    before effective_from, the chosen schedule from then on, logged as a
+    change from the default like any reassignment.
+
+    The name is matched as a substring of the ticket's client, so a name that
+    already contains an existing entry's name is refused: those tickets price
+    through that entry today, and the longer new name would quietly take them.
+    """
+    try:
+        try:
+            body = req.get_json()
+        except ValueError:
+            return error(400, "Body must be JSON")
+        client_name = " ".join(str(body.get("client_name") or "").split())
+        sk = body.get("schedule_key")
+        if not client_name:
+            return error(400, "client_name is required")
+        if not sk:
+            return error(400, "schedule_key is required")
+
+        raw_date = str(body.get("effective_from") or "").strip()
+        try:
+            effective = (date.fromisoformat(raw_date) if raw_date
+                         else datetime.now(ZoneInfo("America/Edmonton")).date())
+        except ValueError:
+            return error(400, "effective_from must be a date, YYYY-MM-DD")
+        changed_by = str(body.get("changed_by") or "").strip() or "unknown"
+        note = str(body.get("note") or "").strip() or "Client added"
+
+        lowered = client_name.lower()
+        for row in query("SELECT client_name FROM vgt_client_schedule_map"):
+            existing = row["client_name"]
+            if existing.lower() == lowered:
+                return error(409, f"{existing} already has an entry")
+            if existing.lower() in lowered:
+                return error(409, f"{client_name} already prices through {existing}. "
+                                  f"Change {existing} instead.")
+
+        scheds = {r["schedule_key"]: r["id"] for r in query(
+            "SELECT id, schedule_key FROM vgt_rate_schedules WHERE schedule_key IN (%s, %s)",
+            (sk, DEFAULT_SCHEDULE_KEY))}
+        if sk not in scheds:
+            return not_found("Schedule")
+        new_id = scheds[sk]
+        default_id = scheds.get(DEFAULT_SCHEDULE_KEY, new_id)
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vgt_client_schedule_map (client_name, schedule_id, notes) "
+                    "VALUES (%s, %s, %s) RETURNING id",
+                    (client_name, new_id, "Added in VG-Time"),
+                )
+                client_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO vgt_client_schedule_periods "
+                    "(client_id, schedule_id, valid_from, valid_to, changed_by, note) "
+                    "VALUES (%s, %s, NULL, %s, %s, %s)",
+                    (client_id, default_id, effective - timedelta(days=1), changed_by,
+                     "Default schedule before the client had an entry"),
+                )
+                cur.execute(
+                    "INSERT INTO vgt_client_schedule_periods "
+                    "(client_id, schedule_id, valid_from, valid_to, "
+                    " previous_schedule_id, changed_by, note) "
+                    "VALUES (%s, %s, %s, NULL, %s, %s, %s)",
+                    (client_id, new_id, effective, default_id, changed_by, note),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_connection(conn)
+
+        return ok({
+            "message": "Client added",
+            "client_name": client_name,
+            "schedule_key": sk,
+            "effective_from": effective.isoformat(),
+        })
+    except Exception as e:
+        return error(500, str(e))
+
+
 # The category list is closed on purpose. These are the six headings the rate
 # workbook publishes, and the costed-ticket PDF groups line items by them, so a
 # typo here would silently create a seventh group that renders as its own
