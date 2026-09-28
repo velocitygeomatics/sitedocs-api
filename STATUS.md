@@ -45,10 +45,9 @@ service item to rate slug to time-ticket column crosswalk out of the browser
 ## Open
 
 - **README drift.** It predates the rates and time-ticket routes and the History tab support.
-- **Root clutter**, all git-ignored (verified 2026-09-28): `# Full sync (all stages).txt`,
-  `$key = az functionapp config appset.txt`, `Untitled.txt`, `function_app.py.bak`, `etl.zip`,
-  `local.settings.json`. The two `.txt` notes and the `.bak` contain long key-like strings. They
-  cannot reach git, but they are plaintext secrets on disk outside `local.settings.json`. Delete
-  the notes and the `.bak`.
+- **Root clutter**, git-ignored: `Untitled.txt`, `etl.zip`, `local.settings.json`. Two April
+  notes and `function_app.py.bak` held key-like strings in plaintext; moved to the Recycle Bin
+  2026-09-28. **The keys they held should be treated as exposed and rotated** if still in use ⚠
+  (the second-key rotation support from 2026-09-16 makes that outage-free).
 - **The QB crosswalk** (untracked SQL above) is the next piece: until it lands, the server
   cannot answer "was this column invoiced, and at what rate?"
