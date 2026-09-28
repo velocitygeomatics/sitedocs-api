@@ -259,11 +259,14 @@ class UpdateClientScheduleTests(unittest.TestCase):
     def _run(self, payload=None, client=True, sched=True):
         log = []
         cur = _FakeCursor(log, rowcount=1)
+        # The client's open schedule period: id 7, in force since before
+        # periods existed. See test_rate_periods_and_price_lock.py.
+        cur.fetchone = lambda: (7, None)
         conn = _FakeConn(cur)
 
         def fake_query(sql, params=None):
             if "vgt_client_schedule_map" in sql:
-                return [{"id": 11}] if client else []
+                return [{"id": 11, "schedule_id": 2}] if client else []
             if "vgt_rate_schedules" in sql:
                 return [{"id": 1}] if sched else []
             return []
@@ -287,8 +290,7 @@ class UpdateClientScheduleTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(conn.committed)
 
-        sql, params = log[0]
-        self.assertIn("UPDATE vgt_client_schedule_map", sql)
+        sql, params = next(e for e in log if "UPDATE vgt_client_schedule_map" in e[0])
         self.assertIn("schedule_id", sql)
         # Scoped by the map row's own id. Keyed on schedule_id instead, this
         # would move every client that shared the old schedule.

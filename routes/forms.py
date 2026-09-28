@@ -314,7 +314,56 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     """
     params.extend([count, offset])
     rows = query(sql, tuple(params))
+    _attach_locked_prices(rows)
     return ok(paginated_response(rows, total, page, count))
+
+
+def _attach_locked_prices(rows):
+    """
+    Give each ticket a locked_prices object: row_key -> the price that row was
+    exported at. A row with a lock is billed; VG-Time and the costed ticket
+    show the lock instead of re-pricing it from today's rates.
+
+    A separate query, and best-effort, so a missing or unreadable price table
+    costs the locks and not the ticket list: without them every row prices
+    live, which is what happened before locks existed.
+    """
+    for r in rows:
+        r["locked_prices"] = {}
+    ids = [str(r["form_id"]) for r in rows if r.get("form_id")]
+    if not ids:
+        return
+    try:
+        prices = query("""
+            SELECT form_id, row_key, run_id, schedule_key, schedule_name,
+                   rate_key, qb_item, qty, unit, rate, amount, price_source,
+                   priced_by, priced_at
+              FROM time_ticket_row_prices
+             WHERE form_id = ANY(%s::uuid[])
+        """, (ids,))
+    except Exception as exc:  # noqa: BLE001 - degrade to live pricing
+        logging.warning("locked prices unavailable: %s", exc)
+        return
+    by_form = {str(r["form_id"]): r["locked_prices"] for r in rows}
+    num = lambda v: float(v) if v is not None else None  # noqa: E731
+    for p in prices:
+        target = by_form.get(str(p["form_id"]))
+        if target is None:
+            continue
+        target[p["row_key"]] = {
+            "scheduleKey": p["schedule_key"],
+            "scheduleName": p["schedule_name"],
+            "rateKey": p["rate_key"],
+            "qbItem": p["qb_item"],
+            "qty": num(p["qty"]),
+            "unit": p["unit"],
+            "rate": num(p["rate"]),
+            "amount": num(p["amount"]),
+            "source": p["price_source"],
+            "runId": str(p["run_id"]) if p["run_id"] else None,
+            "pricedBy": p["priced_by"],
+            "pricedAt": p["priced_at"].isoformat() if p["priced_at"] else None,
+        }
 
 
 # The :guid constraint is what keeps this off /time-tickets/exports. Without it
@@ -459,6 +508,18 @@ def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as exc:  # noqa: BLE001 - reported, never raised
         logging.exception("export run log failed: %s", exc)
 
+    # The price of each row at the moment it was billed. Best-effort for the
+    # same reason as the run log: the stamps are committed and are what keeps
+    # a row out of a second payroll run, so a price that fails to lock is
+    # reported, not allowed to fail the export after the fact.
+    prices_locked, price_error = 0, None
+    try:
+        prices_locked = _lock_row_prices(
+            body.get("prices"), form_ids, pairs, run_id, exported_by)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        logging.exception("price lock failed: %s", exc)
+        price_error = str(exc)
+
     return ok({
         "marked": marked,
         "already": found - marked,
@@ -469,7 +530,89 @@ def mark_time_tickets_exported(req: func.HttpRequest) -> func.HttpResponse:
         "exportedBy": exported_by,
         "runId": run_id,
         "runLogged": run_id is not None,
+        "pricesLocked": prices_locked,
+        "priceLockError": price_error,
     })
+
+
+def _lock_row_prices(prices, form_ids, pairs, run_id, exported_by):
+    """
+    Insert one time_ticket_row_prices row per priced row, and return how many
+    were new. The first lock wins: a row re-exported later keeps the price it
+    was first billed at.
+
+    Only rows this request actually exported can be locked - any row of a
+    whole ticket in formIds, or exactly the (formId, rowKey) pairs in rows -
+    so a stray entry cannot put a price on work that was never billed.
+    Malformed entries are skipped rather than failing the batch.
+    """
+    if not isinstance(prices, list) or not prices:
+        return 0
+    whole = set(form_ids)
+    partial = set(pairs)
+
+    def _num(v):
+        try:
+            return float(v) if v is not None and v != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    def _txt(v):
+        s = str(v).strip() if v is not None else ""
+        return s or None
+
+    cols = {k: [] for k in ("form_id", "row_key", "schedule_key", "schedule_name",
+                            "rate_key", "qb_item", "qty", "unit", "rate",
+                            "amount", "price_source")}
+    seen = set()
+    for p in prices:
+        if not isinstance(p, dict):
+            continue
+        key = _txt(p.get("rowKey"))
+        amount = _num(p.get("amount"))
+        try:
+            fid = str(uuid.UUID(str(p.get("formId"))))
+        except (ValueError, AttributeError):
+            continue
+        if not key or key == "*" or amount is None or (fid, key) in seen:
+            continue
+        if fid not in whole and (fid, key) not in partial:
+            continue
+        seen.add((fid, key))
+        for col, val in (("form_id", fid), ("row_key", key),
+                         ("schedule_key", _txt(p.get("scheduleKey"))),
+                         ("schedule_name", _txt(p.get("scheduleName"))),
+                         ("rate_key", _txt(p.get("rateKey"))),
+                         ("qb_item", _txt(p.get("qbItem"))),
+                         ("qty", _num(p.get("qty"))),
+                         ("unit", _txt(p.get("unit"))),
+                         ("rate", _num(p.get("rate"))),
+                         ("amount", round(amount, 2)),
+                         ("price_source", _txt(p.get("source")) or "rated")):
+            cols[col].append(val)
+    if not seen:
+        return 0
+
+    inserted = execute("""
+        INSERT INTO time_ticket_row_prices
+            (form_id, row_key, run_id, schedule_key, schedule_name, rate_key,
+             qb_item, qty, unit, rate, amount, price_source, priced_by)
+        SELECT tt.form_id, p.row_key, %s::uuid, p.schedule_key, p.schedule_name,
+               p.rate_key, p.qb_item, p.qty, p.unit, p.rate, p.amount,
+               p.price_source, %s
+          FROM unnest(%s::uuid[], %s::text[], %s::text[], %s::text[], %s::text[],
+                      %s::text[], %s::numeric[], %s::text[], %s::numeric[],
+                      %s::numeric[], %s::text[])
+               AS p(form_id, row_key, schedule_key, schedule_name, rate_key,
+                    qb_item, qty, unit, rate, amount, price_source)
+          JOIN time_tickets tt ON tt.form_id = p.form_id
+        ON CONFLICT (form_id, row_key) DO NOTHING
+        RETURNING form_id
+    """, (run_id, exported_by, cols["form_id"], cols["row_key"],
+          cols["schedule_key"], cols["schedule_name"], cols["rate_key"],
+          cols["qb_item"], cols["qty"], cols["unit"], cols["rate"],
+          cols["amount"], cols["price_source"]))
+    return len(inserted)
 
 
 def _log_export_run(body, exported_by, form_ids, pairs, *,

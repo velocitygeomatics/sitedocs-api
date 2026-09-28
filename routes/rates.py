@@ -4,6 +4,9 @@ Blueprints for rate engine: schedules and rate items (VG-Time).
 """
 
 import logging
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import azure.functions as func
 from shared.db import (
     query, get_connection, release_connection, require_api_key,
@@ -104,11 +107,67 @@ def get_rates(req: func.HttpRequest) -> func.HttpResponse:
             "RATE_ITEMS": list(items_dict.values()),
             "CLIENT_MAP": client_map,
             "OVERRIDES":  overrides,
+            "CLIENT_PERIODS": _client_periods(),
         })
 
     except Exception as e:
         logging.error(f"get_rates failed: {e}")
         return error(503, str(e))
+
+
+def _client_periods():
+    """
+    Which schedule each client was on over which dates, oldest first. A ticket
+    prices on the period covering its ticket_date, so a reassignment applies
+    from its effective date forward and leaves earlier work where it was.
+
+    Best-effort: without the periods table every client prices on its current
+    map entry, which is how pricing worked before periods existed, and that
+    is a better failure than taking the whole rate payload down with it.
+    Who made each change is left to the authenticated change log; this
+    payload is served without a key.
+    """
+    try:
+        return query("""
+            SELECT c.client_name, s.schedule_key,
+                   p.valid_from::text AS valid_from, p.valid_to::text AS valid_to
+              FROM vgt_client_schedule_periods p
+              JOIN vgt_client_schedule_map c ON c.id = p.client_id
+              JOIN vgt_rate_schedules      s ON s.id = p.schedule_id
+             ORDER BY c.client_name, p.valid_from NULLS FIRST
+        """)
+    except Exception as exc:  # noqa: BLE001 - degrade to undated map
+        logging.warning("client schedule periods unavailable: %s", exc)
+        return []
+
+
+@bp.route(route="rates/client-changes", methods=["GET"])
+@require_api_key
+def list_client_schedule_changes(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /api/rates/client-changes - the client reassignment log, newest first.
+
+    One entry per reassignment: client, old and new schedule, the date it took
+    effect, who made it and when. A client's first period is not a change and
+    is left out.
+    """
+    try:
+        rows = query("""
+            SELECT c.client_name,
+                   ps.schedule_key AS previous_schedule_key,
+                   ps.name         AS previous_schedule_name,
+                   s.schedule_key, s.name AS schedule_name,
+                   p.valid_from::text AS effective_from,
+                   p.changed_by, p.changed_at, p.note
+              FROM vgt_client_schedule_periods p
+              JOIN vgt_client_schedule_map c  ON c.id  = p.client_id
+              JOIN vgt_rate_schedules      s  ON s.id  = p.schedule_id
+              JOIN vgt_rate_schedules      ps ON ps.id = p.previous_schedule_id
+             ORDER BY p.changed_at DESC, p.id DESC
+        """)
+        return ok(rows)
+    except Exception as e:
+        return error(500, str(e))
 
 
 @bp.route(route="rates/schedules", methods=["POST"])
@@ -272,17 +331,42 @@ def update_client_schedule(req: func.HttpRequest) -> func.HttpResponse:
 
     404s on an unknown client or schedule rather than inserting, so a typo
     cannot quietly create a new mapping that shadows a real one.
+
+    Body: {"schedule_key": "...", "effective_from": "YYYY-MM-DD",
+           "changed_by": "name", "note": "..."}
+
+    The change applies from effective_from forward (default: today, Mountain
+    time). Tickets dated before it keep the schedule they were on, and a row
+    already exported keeps its locked price whatever the date. The open period
+    is closed the day before and a new one opened, in one transaction with the
+    map update, so the history and the map cannot disagree.
+
+    effective_from must fall after the start of the period it replaces: a
+    change that reaches back past an earlier change would rewrite that change
+    rather than follow it, and history is not edited from here.
     """
     try:
         client_name = req.route_params.get("client_name")
-        body = req.get_json()
+        try:
+            body = req.get_json()
+        except ValueError:
+            return error(400, "Body must be JSON")
         sk = body.get("schedule_key")
 
         if not sk:
             return error(400, "schedule_key is required")
 
+        raw_date = str(body.get("effective_from") or "").strip()
+        try:
+            effective = (date.fromisoformat(raw_date) if raw_date
+                         else datetime.now(ZoneInfo("America/Edmonton")).date())
+        except ValueError:
+            return error(400, "effective_from must be a date, YYYY-MM-DD")
+        changed_by = str(body.get("changed_by") or "").strip() or "unknown"
+        note = str(body.get("note") or "").strip() or None
+
         client = query(
-            "SELECT id FROM vgt_client_schedule_map WHERE client_name = %s",
+            "SELECT id, schedule_id FROM vgt_client_schedule_map WHERE client_name = %s",
             (client_name,),
         )
         sched = query("SELECT id FROM vgt_rate_schedules WHERE schedule_key = %s", (sk,))
@@ -290,12 +374,56 @@ def update_client_schedule(req: func.HttpRequest) -> func.HttpResponse:
         if not client or not sched:
             return not_found("Client or Schedule")
 
+        client_id = client[0]["id"]
+        new_id = sched[0]["id"]
+        old_id = client[0]["schedule_id"]
+        if old_id == new_id:
+            return error(400, f"{client_name} is already on {sk}")
+
         conn = get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE vgt_client_schedule_map SET schedule_id = %s WHERE id = %s",
-                    (sched[0]["id"], client[0]["id"]),
+                    "SELECT id, valid_from FROM vgt_client_schedule_periods "
+                    "WHERE client_id = %s AND valid_to IS NULL FOR UPDATE",
+                    (client_id,),
+                )
+                open_period = cur.fetchone()
+                if open_period and open_period[1] is not None and effective <= open_period[1]:
+                    conn.rollback()
+                    return error(
+                        409,
+                        f"{client_name}'s current schedule took effect on "
+                        f"{open_period[1].isoformat()}. A new change has to "
+                        "take effect after that date.",
+                    )
+                day_before = effective - timedelta(days=1)
+                if open_period:
+                    cur.execute(
+                        "UPDATE vgt_client_schedule_periods SET valid_to = %s WHERE id = %s",
+                        (day_before, open_period[0]),
+                    )
+                elif old_id is not None:
+                    # A client mapped before periods were seeded, or added
+                    # since without one: record what it was on until now.
+                    cur.execute(
+                        "INSERT INTO vgt_client_schedule_periods "
+                        "(client_id, schedule_id, valid_from, valid_to, changed_by, note) "
+                        "VALUES (%s, %s, NULL, %s, %s, %s)",
+                        (client_id, old_id, day_before, changed_by,
+                         "Assignment before the first recorded change"),
+                    )
+                cur.execute(
+                    "INSERT INTO vgt_client_schedule_periods "
+                    "(client_id, schedule_id, valid_from, valid_to, "
+                    " previous_schedule_id, changed_by, note) "
+                    "VALUES (%s, %s, %s, NULL, %s, %s, %s)",
+                    (client_id, new_id, effective, old_id, changed_by, note),
+                )
+                cur.execute(
+                    "UPDATE vgt_client_schedule_map SET schedule_id = %s, "
+                    "updated_at = NOW() WHERE id = %s",
+                    (new_id, client_id),
                 )
             conn.commit()
         except Exception:
@@ -308,6 +436,7 @@ def update_client_schedule(req: func.HttpRequest) -> func.HttpResponse:
             "message": "Client reassigned",
             "client_name": client_name,
             "schedule_key": sk,
+            "effective_from": effective.isoformat(),
         })
     except Exception as e:
         return error(500, str(e))
@@ -481,6 +610,27 @@ def delete_schedule(req: func.HttpRequest) -> func.HttpResponse:
                 "Schedule is still mapped to "
                 f"{len(names)} client(s): {', '.join(names)}. "
                 "Reassign them before deleting.",
+            )
+
+        # A schedule that priced any client's past work is part of that
+        # history; the foreign key would refuse the delete with a bare 500.
+        try:
+            used = query(
+                "SELECT DISTINCT c.client_name FROM vgt_client_schedule_periods p "
+                "JOIN vgt_client_schedule_map c ON c.id = p.client_id "
+                "WHERE p.schedule_id = %s OR p.previous_schedule_id = %s "
+                "ORDER BY c.client_name",
+                (sid, sid),
+            )
+        except Exception:  # noqa: BLE001 - no periods table, no history to guard
+            used = []
+        if used:
+            names = [c["client_name"] for c in used]
+            return error(
+                409,
+                "Schedule priced past work for "
+                f"{len(names)} client(s): {', '.join(names)}. "
+                "It is kept so that history still reads correctly.",
             )
 
         conn = get_connection()
