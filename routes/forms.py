@@ -316,6 +316,7 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     rows = query(sql, tuple(params))
     _attach_locked_prices(rows)
     _attach_job_clients(rows)
+    _attach_job_refs(rows)
     return ok(paginated_response(rows, total, page, count))
 
 
@@ -367,6 +368,61 @@ def _attach_job_clients(rows):
             r["job_client"] = f["name"]
             r["job_client_code"] = f["code"]
             r["job_client_source"] = f["source"]
+
+
+def _attach_job_refs(rows):
+    """
+    Give each ticket its job's AFE / Cost Centre (job_afe) and PO# (job_po)
+    for the costed ticket header. Latitude holds them in txtJobUserField3 and
+    txtJobUserField4.
+
+    Job Setup keeps its own copy, stamped refs_updated_at, whenever a job is
+    created or its refs are edited there. That copy wins only when it is newer
+    than the last Latitude snapshot of tblJobs, so an AFE added on Job Detail
+    prints on the next ticket pulled while a later change made in Latitude
+    itself still wins once it has been copied. Blank is null.
+
+    Best-effort, like the job clients: each source degrades on its own, and
+    without either the ticket prints no reference line.
+    """
+    for r in rows:
+        r["job_afe"] = r["job_po"] = None
+    jobs = sorted({(r.get("job_no") or "").strip() for r in rows} - {""})
+    if not jobs:
+        return
+    refs = {}
+    try:
+        for f in query("""
+            SELECT j.job_no,
+                   NULLIF(TRIM(lj."txtJobUserField3"), '') AS afe,
+                   NULLIF(TRIM(lj."txtJobUserField4"), '') AS po
+              FROM unnest(%s::text[]) AS j(job_no)
+              JOIN LATERAL (SELECT "txtJobUserField3", "txtJobUserField4"
+                              FROM latitude."tblJobs"
+                             WHERE "Job_Number" = j.job_no LIMIT 1) lj ON true
+        """, (jobs,)):
+            refs[f["job_no"]] = (f["afe"], f["po"])
+    except Exception as exc:  # noqa: BLE001 - print no reference line
+        logging.warning("job refs unavailable from Latitude: %s", exc)
+    try:
+        # Separate query: before the job_setup migration adds these columns
+        # it fails here and the Latitude copy still prints.
+        for f in query("""
+            SELECT job_number AS job_no,
+                   NULLIF(TRIM(afe_cost_centre), '') AS afe,
+                   NULLIF(TRIM(po_number), '') AS po
+              FROM public.job_setup
+             WHERE job_number = ANY(%s)
+               AND refs_updated_at > COALESCE(
+                       (SELECT max(snapped_at) FROM latitude._table_watch
+                         WHERE table_name = 'tblJobs'), '-infinity')
+        """, (jobs,)):
+            refs[f["job_no"]] = (f["afe"], f["po"])
+    except Exception as exc:  # noqa: BLE001 - keep the Latitude copy
+        logging.warning("job refs unavailable from Job Setup: %s", exc)
+    for r in rows:
+        afe, po = refs.get((r.get("job_no") or "").strip(), (None, None))
+        r["job_afe"], r["job_po"] = afe, po
 
 
 def _attach_locked_prices(rows):
