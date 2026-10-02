@@ -10,6 +10,7 @@ import azure.functions as func
 
 from routes.entities import bp as entities_bp
 from routes.forms import bp as forms_bp
+from routes.ticket_adjustments import bp as ticket_adjustments_bp
 from routes.proxies import bp as proxies_bp
 from routes.etl import bp as etl_bp
 from routes.rates import bp as rates_bp
@@ -20,6 +21,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 app.register_functions(entities_bp)
 app.register_functions(forms_bp)
+app.register_functions(ticket_adjustments_bp)
 app.register_functions(proxies_bp)
 app.register_functions(etl_bp)
 app.register_functions(rates_bp)

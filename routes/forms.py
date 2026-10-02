@@ -12,6 +12,7 @@ from shared.db import (
     query, execute, require_api_key, ok, error, not_found,
     parse_pagination, paginated_response,
 )
+from routes.ticket_adjustments import attach_row_adjustments
 
 bp = func.Blueprint()
 
@@ -317,6 +318,7 @@ def get_time_tickets(req: func.HttpRequest) -> func.HttpResponse:
     _attach_locked_prices(rows)
     _attach_job_clients(rows)
     _attach_job_refs(rows)
+    attach_row_adjustments(rows)
     return ok(paginated_response(rows, total, page, count))
 
 
